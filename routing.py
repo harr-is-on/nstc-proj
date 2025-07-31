@@ -57,6 +57,11 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
     - 實際移動機器人 (主引擎會根據你回傳的路徑來執行)。
     ---
     """
+    # 調試信息：記錄路徑規劃的參數
+    if forbidden_cells:
+        print(f"🗺️ 路徑規劃: {start_pos} -> {target_pos}, 禁止區域: {forbidden_cells}")
+    else:
+        print(f"🗺️ 路徑規劃: {start_pos} -> {target_pos}")
     rows, cols = warehouse_matrix.shape
 
     # --- A* 演算法的初始化 ---
