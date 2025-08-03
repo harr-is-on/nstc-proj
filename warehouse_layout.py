@@ -145,3 +145,90 @@ if __name__ == '__main__':
 
     print("\nDisplaying warehouse plot for verification...")
     plot_warehouse(matrix)
+
+
+def get_road_type_info():
+    """
+    返回道路類型資訊，用於 S-shape 路徑規劃。
+    
+    基於 old_rs/layout.py 的定義:
+    - Main Roads: 水平走道 (horizontal aisles)
+    - Sub Roads: 垂直走道 (vertical aisles) 
+    - Turn Points: main road 與 sub road 交叉點
+    """
+    num_rows = 14
+    num_cols = 15
+    vertical_aisles = [0, 1, 4, 7, 10, 13, 14]
+    horizontal_aisles = [0, 1, 6, 7, 12, 13]
+    
+    main_roads = set()
+    sub_roads = set()
+    turn_points = set()
+    
+    for r in range(num_rows):
+        for c in range(num_cols):
+            if r in horizontal_aisles and c in vertical_aisles:
+                turn_points.add((r, c))
+            elif r in horizontal_aisles:
+                main_roads.add((r, c))
+            elif c in vertical_aisles:
+                sub_roads.add((r, c))
+    
+    return {
+        'main_roads': main_roads,
+        'sub_roads': sub_roads, 
+        'turn_points': turn_points,
+        'vertical_aisles': vertical_aisles,
+        'horizontal_aisles': horizontal_aisles
+    }
+
+
+def is_main_road(pos: Coord) -> bool:
+    """檢查位置是否為主道路"""
+    r, c = pos
+    horizontal_aisles = [0, 1, 6, 7, 12, 13]
+    vertical_aisles = [0, 1, 4, 7, 10, 13, 14]
+    return r in horizontal_aisles and c not in vertical_aisles
+
+
+def is_sub_road(pos: Coord) -> bool:
+    """檢查位置是否為子道路"""
+    r, c = pos
+    horizontal_aisles = [0, 1, 6, 7, 12, 13]
+    vertical_aisles = [0, 1, 4, 7, 10, 13, 14]
+    return c in vertical_aisles and r not in horizontal_aisles
+
+
+def is_turn_point(pos: Coord) -> bool:
+    """檢查位置是否為轉彎點"""
+    r, c = pos
+    horizontal_aisles = [0, 1, 6, 7, 12, 13]
+    vertical_aisles = [0, 1, 4, 7, 10, 13, 14]
+    return r in horizontal_aisles and c in vertical_aisles
+
+
+def find_nearest_turn_point(pos: Coord, direction: str = 'any') -> Optional[Coord]:
+    """
+    尋找最近的轉彎點
+    
+    :param pos: 當前位置
+    :param direction: 'up', 'down', 'any'
+    :return: 最近的轉彎點座標
+    """
+    r, c = pos
+    horizontal_aisles = [0, 1, 6, 7, 12, 13]
+    
+    if direction == 'up':
+        candidates = [hr for hr in horizontal_aisles if hr < r]
+        if candidates:
+            return (max(candidates), c)
+    elif direction == 'down':
+        candidates = [hr for hr in horizontal_aisles if hr > r]
+        if candidates:
+            return (min(candidates), c)
+    else:  # 'any'
+        distances = [(abs(r - hr), (hr, c)) for hr in horizontal_aisles]
+        if distances:
+            return min(distances)[1]
+    
+    return None
