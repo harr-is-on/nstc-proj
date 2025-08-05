@@ -12,8 +12,9 @@ ROBOT_CONFIG = {
     "pickup_duration": 2,         # 機器人撿貨所需的時間步
     "dropoff_duration": 1,        # 機器人交貨所需的時間步
     "initial_battery": (20, 100), # 機器人初始電量的隨機範圍 (最小值, 最大值)
-    "energy_per_step": 1,         # 機器人每移動一步消耗的電量
-    "replan_wait_threshold": 3,   # 機器人因擁塞等待多久後會嘗試重新規劃路徑
+    "energy_per_step": 0.4,       # 機器人每移動一步消耗的電量
+    "energy_per_pickup": 1,       # 機器人每撿一次貨消耗的電量
+    "replan_wait_threshold": 3,   # 機器人因擁塞等待多久後會嘗試重新規劃路徑,
 }
 
 # --- 模擬與任務相關設定 ---
@@ -48,14 +49,15 @@ class Robot:
         self,
         robot_id: str,
         initial_position: Coord,
-        battery_level: int = 100,
+        battery_level: float = 100.0,
         move_speed: int = 1,
         pickup_duration: int = 2,
         dropoff_duration: int = 2,
-        charging_threshold: int = 20,
-        full_charge_level: int = 100,
-        energy_per_step: int = 1,
-        replan_wait_threshold: int = 3
+        charging_threshold: float = 20.0,
+        full_charge_level: float = 100.0,
+        energy_per_step: float = 1.0,
+        energy_per_pickup: float = 1.0,
+        replan_wait_threshold: int = 3,
     ):
         # 基本屬性 / 狀態
         self.id = robot_id
@@ -77,12 +79,13 @@ class Robot:
         self.wait_time: int = 0 # 因壅塞等待的時間
 
         # 電池 / 充電狀態資料
-        self.battery_level: int = battery_level
+        self.battery_level: float = float(battery_level)
         self.charging_status: bool = False
-        self.charging_threshold: int = charging_threshold # 低於此電量需充電
-        self.full_charge_level: int = full_charge_level # 充電到此電量即停止
-        self.energy_per_step: int = energy_per_step # 每步消耗的電量
-        self.replan_wait_threshold: int = replan_wait_threshold # 等待重新規劃的閾值
+        self.charging_threshold: float = float(charging_threshold) # 低於此電量需充電
+        self.full_charge_level: float = float(full_charge_level) # 充電到此電量即停止
+        self.energy_per_step: float = float(energy_per_step) # 每步消耗的電量
+        self.energy_per_pickup: float = float(energy_per_pickup) # 【新】每次撿貨消耗的電量
+        self.replan_wait_threshold: int = replan_wait_threshold # 等待重新規劃的閾值,
 
     @property
     def next_position(self) -> Optional[Coord]:
@@ -163,7 +166,7 @@ class Robot:
         self.status = RobotStatus.IDLE
         print(f"✅ 機器人 {self.id} 充電完畢，恢復閒置狀態。")
 
-    def charge(self, amount: int) -> bool:
+    def charge(self, amount: float) -> bool:
         """
         為機器人充電。
         :param amount: 要增加的電量。
@@ -203,6 +206,8 @@ class Robot:
         # 如果計時器跑完了，就代表撿貨已完成
         if self.pickup_timer == 0:
             self.carrying_item = True
+            self.battery_level -= self.energy_per_pickup
+            print(f"⚡️ 機器人 {self.id} 撿貨消耗 {self.energy_per_pickup} 電量，剩餘 {self.battery_level:.2f}。")
             return True
         
         # 計時器還沒跑完
@@ -283,10 +288,11 @@ def initialize_robots(
         "move_speed": robot_config.get("move_speed", 1),
         "pickup_duration": robot_config.get("pickup_duration", 2),
         "dropoff_duration": robot_config.get("dropoff_duration", 2),
-        "charging_threshold": charging_config.get("charging_threshold", 20),
-        "full_charge_level": charging_config.get("full_charge_level", 100),
-        "energy_per_step": robot_config.get("energy_per_step", 1),
-        "replan_wait_threshold": ROBOT_CONFIG.get("replan_wait_threshold", 3),
+        "charging_threshold": charging_config.get("charging_threshold", 20.0),
+        "full_charge_level": charging_config.get("full_charge_level", 100.0),
+        "energy_per_step": robot_config.get("energy_per_step", 1.0),
+        "energy_per_pickup": robot_config.get("energy_per_pickup", 1.0),
+        "replan_wait_threshold": ROBOT_CONFIG.get("replan_wait_threshold", 3)
     }
 
     # 建立一個 Robot 物件的字典

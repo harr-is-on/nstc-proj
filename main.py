@@ -5,6 +5,7 @@
 """
 
 import json
+import importlib
 from typing import Tuple, List, Dict, Optional
 
 # 從專案中匯入模組
@@ -35,23 +36,23 @@ print(f"--- 正在載入策略 ---")
 print(f"  路徑規劃: {ROUTING_STRATEGY}")
 print(f"  充電: {CHARGING_STRATEGY}")
 
-# 匯入路徑規劃策略
-if ROUTING_STRATEGY == 'routing':
-    from routing import plan_route, euclidean_distance, find_adjacent_aisle
-else:
-    # 這裡是為了未來擴充性預留的。
-    # 如果您在 strategy_config.py 中設定了新的策略名稱，
-    # 您需要在這裡加入對應的 `elif` 條件來匯入您的新模組。
-    # 例如:
-    # elif ROUTING_STRATEGY == 'my_new_routing':
-    #     from my_new_routing import plan_route, ...
-    raise NotImplementedError(f"路徑規劃策略 '{ROUTING_STRATEGY}' 尚未被實作。")
+try:
+    # 動態匯入路徑規劃策略
+    routing_module = importlib.import_module(ROUTING_STRATEGY)
+    plan_route = getattr(routing_module, 'plan_route')
+    euclidean_distance = getattr(routing_module, 'euclidean_distance')
+    find_adjacent_aisle = getattr(routing_module, 'find_adjacent_aisle')
+    
+    # 動態匯入充電策略
+    charging_module = importlib.import_module(CHARGING_STRATEGY)
+    ChargingStation = getattr(charging_module, 'ChargingStation')
 
-# 匯入充電策略
-if CHARGING_STRATEGY == 'charging_model':
-    from charging_model import ChargingStation
-else:
-    raise NotImplementedError(f"充電策略 '{CHARGING_STRATEGY}' 尚未被實作。")
+except ImportError as e:
+    # 如果找不到模組檔案 (例如 routing_m.py 不存在)，拋出更明確的錯誤
+    raise ImportError(f"無法載入策略模組: {e}。請確認檔案名稱是否正確。")
+except AttributeError as e:
+    # 如果模組內缺少必要的函式或類別，拋出更明確的錯誤
+    raise AttributeError(f"策略模組中缺少必要的定義: {e}。")
 
 
 class SimulationEngine:
@@ -125,10 +126,10 @@ class SimulationEngine:
 
         # 如果入口點沒有被佔用或被預訂，則返回該入口點
         if entry_point not in occupied_or_targeted:
-            print(f"✅ 站點 {station_info['id']} 的入口 {entry_point} 可用")
+            print(f" 站點 {station_info['id']} 的入口 {entry_point} 可用")
             return entry_point
         else:
-            print(f"❌ 站點 {station_info['id']} 的入口 {entry_point} 被佔用")
+            print(f" 站點 {station_info['id']} 的入口 {entry_point} 被佔用")
             return None
 
     def _update_moving_robot(self, robot: Robot, approved_robot_ids: set):
@@ -170,7 +171,7 @@ class SimulationEngine:
 
     def _try_replanning_path(self, robot: Robot):
         """當機器人等待過久時，嘗試為其重新規劃路徑。"""
-        print(f"🤔 機器人 {robot.id} 等待過久，嘗試重新規劃路徑...")
+        print(f" 機器人 {robot.id} 等待過久，嘗試重新規劃路徑...")
         
         dynamic_obstacles = [r.position for r in self.robots.values() if r.id != robot.id]
         final_destination = robot.path[-1]
@@ -196,7 +197,7 @@ class SimulationEngine:
                 final_destination = entry_point
                 # 嚴格限制：禁止所有排隊區，除了它自己的目標入口點
                 forbidden_cells = self.all_queue_spots - {entry_point}
-                print(f"🔄 機器人 {robot.id} 重新規劃路徑，目標入口: {entry_point}")
+                print(f" 機器人 {robot.id} 重新規劃路徑，目標入口: {entry_point}")
             else:
                 forbidden_cells = self.all_queue_spots
         
@@ -207,14 +208,20 @@ class SimulationEngine:
             robot.path = new_path
             robot.wait_time = 0
         else:
-            print(f"❌ 機器人 {robot.id} 找不到替代路徑，將在下一輪再試。")
+            print(f" 機器人 {robot.id} 找不到替代路徑，將在下一輪再試。")
 
     def _update_action_robot(self, robot: Robot, time_step: int):
         """處理正在執行動作 (撿貨、交貨) 的機器人。"""
         if robot.status == RobotStatus.PICKING:
+            battery_before_pick = robot.battery_level
             if robot.pick_item():
+                # 【新】記錄撿貨所消耗的電量
+                energy_consumed = battery_before_pick - robot.battery_level
+                if energy_consumed > 0:
+                    self.performance_logger.log_energy_usage(robot.id, energy_consumed)
+
                 completed_shelf = robot.task['shelf_locations'].pop(0)
-                print(f"👍 機器人 {robot.id} 在 {completed_shelf} 完成撿貨。")
+                print(f" 機器人 {robot.id} 在 {completed_shelf} 完成撿貨。")
 
                 if robot.task['shelf_locations']:
                     self._plan_path_to_next_shelf(robot, completed_shelf)
@@ -223,14 +230,14 @@ class SimulationEngine:
 
         elif robot.status == RobotStatus.DROPPING_OFF:
             if robot.drop_off_item():
-                print(f"✅ 機器人 {robot.id} 完成任務 {robot.task['task_id']} 的交貨。")
+                print(f" 機器人 {robot.id} 完成任務 {robot.task['task_id']} 的交貨。")
                 self.performance_logger.log_task_completion(time_step)
                 exit_pos = self.picking_exits.get(robot.position)
                 if exit_pos:
                     robot.position = exit_pos
-                    print(f"🤖 機器人 {robot.id} 交貨後移動至出口 {exit_pos}。")
+                    print(f" 機器人 {robot.id} 交貨後移動至出口 {exit_pos}。")
                 else:
-                    print(f"⚠️ 機器人 {robot.id} 在交貨站 {robot.position} 找不到指定的出口！")
+                    print(f" 機器人 {robot.id} 在交貨站 {robot.position} 找不到指定的出口！")
                 robot.clear_task()
 
 
@@ -273,12 +280,12 @@ class SimulationEngine:
         dynamic_obstacles = [r.position for r in self.robots.values() if r.id != robot.id]
         path_to_next_spot = plan_route(robot.position, next_spot_in_line, self.warehouse_matrix, dynamic_obstacles=dynamic_obstacles)
         if path_to_next_spot:
-            print(f"👍 機器人 {robot.id} 從 {robot.position} 向前移動至 {next_spot_in_line}")
+            print(f" 機器人 {robot.id} 從 {robot.position} 向前移動至 {next_spot_in_line}")
             robot.path = path_to_next_spot
             robot.status = RobotStatus.MOVING_TO_CHARGE if "CS" in station_info['id'] else RobotStatus.MOVING_TO_DROPOFF
             spots_targeted_in_queue_logic.add(next_spot_in_line)
         else:
-            print(f"⚠️ 機器人 {robot.id} 在隊列中找不到前往下一格 {next_spot_in_line} 的路徑！")
+            print(f" 機器人 {robot.id} 在隊列中找不到前往下一格 {next_spot_in_line} 的路徑！")
             # 保持 WAITING_IN_QUEUE 狀態，不切換
 
     def _update_idle_robot(self, robot: Robot):
@@ -291,9 +298,9 @@ class SimulationEngine:
                 if path:
                     robot.go_charge(path, best_station['pos'])
                 else:
-                    print(f"⚠️ 機器人 {robot.id} 在 {robot.position} 找不到前往充電排隊區 {best_queue_spot} 的路徑！")
+                    print(f" 機器人 {robot.id} 在 {robot.position} 找不到前往充電排隊區 {best_queue_spot} 的路徑！")
             else:
-                print(f"⏳ 機器人 {robot.id} 需要充電，但所有充電站入口都忙碌中。")
+                print(f" 機器人 {robot.id} 需要充電，但所有充電站入口都忙碌中。")
 
     def _find_closest_available_station(self, pos: Coord, station_list: List[Dict]) -> Tuple[Optional[Dict], Optional[Coord], float]:
         """尋找最近且入口可用的站點。"""
@@ -313,7 +320,7 @@ class SimulationEngine:
 
         start_pos_for_route = find_adjacent_aisle(robot.position, self.warehouse_matrix)
         if not start_pos_for_route:
-            print(f"⚠️ 機器人 {robot.id} 在貨架 {robot.position} 旁找不到可用的走道！")
+            print(f" 機器人 {robot.id} 在貨架 {robot.position} 旁找不到可用的走道！")
             robot.clear_task()
             return
         
@@ -323,16 +330,16 @@ class SimulationEngine:
             robot.path = path
             robot.status = RobotStatus.MOVING_TO_SHELF
         else:
-            print(f"⚠️ 機器人 {robot.id} 在 {start_pos_for_route} 找不到前往下一個貨架 {next_shelf} 的路徑！將在原地等待。")
+            print(f" 機器人 {robot.id} 在 {start_pos_for_route} 找不到前往下一個貨架 {next_shelf} 的路徑！將在原地等待。")
             robot.task['shelf_locations'].insert(0, completed_shelf)
 
     def _plan_path_to_dropoff(self, robot: Robot, completed_shelf: Coord):
         """在所有撿貨點完成後，規劃路徑到交貨站排隊入口（只能從最遠那格進入）"""
-        print(f"🎉 機器人 {robot.id} 完成任務 {robot.task['task_id']} 的所有撿貨點。")
+        print(f" 機器人 {robot.id} 完成任務 {robot.task['task_id']} 的所有撿貨點。")
         best_station, best_queue_spot, _ = self._find_closest_available_station(robot.position, self.picking_stations_info)
         
         if not (best_station and best_queue_spot):
-            print(f"⏳ 機器人 {robot.id} 撿貨完畢，但所有交貨站入口忙碌中，將在原地等待。")
+            print(f" 機器人 {robot.id} 撿貨完畢，但所有交貨站入口忙碌中，將在原地等待。")
             robot.task['shelf_locations'].insert(0, completed_shelf)
             return
         
@@ -341,11 +348,11 @@ class SimulationEngine:
         start_pos_for_route = find_adjacent_aisle(robot.position, self.warehouse_matrix)
         path = plan_route(start_pos_for_route, best_queue_spot, self.warehouse_matrix, forbidden_cells=forbidden_cells)
         if path:
-            print(f"🤖 機器人 {robot.id} 從貨架移至走道 {start_pos_for_route}，前往排隊區入口 {best_queue_spot}。")
+            print(f" 機器人 {robot.id} 從貨架移至走道 {start_pos_for_route}，前往排隊區入口 {best_queue_spot}。")
             robot.position = start_pos_for_route
             robot.set_path_to_dropoff(path, best_station['pos'])
         else:
-            print(f"⚠️ 機器人 {robot.id} 在 {start_pos_for_route} 找不到前往排隊區入口 {best_queue_spot} 的路徑！將在原地等待。")
+            print(f" 機器人 {robot.id} 在 {start_pos_for_route} 找不到前往排隊區入口 {best_queue_spot} 的路徑！將在原地等待。")
             robot.task['shelf_locations'].insert(0, completed_shelf)
 
     def _update_robot_state(self, robot: Robot, approved_ids: set, spots_targeted: set, time_step: int):
@@ -382,7 +389,13 @@ class SimulationEngine:
             if time_step % self.task_generation_interval == 0:
                 self.task_manager.generate_random_task()
             
-            self.task_manager.assign_pending_tasks(self.robots, self.warehouse_matrix, plan_route, forbidden_cells_for_tasks=self.all_queue_spots)
+            self.task_manager.assign_pending_tasks(
+                robots=self.robots, 
+                warehouse_matrix=self.warehouse_matrix, 
+                plan_route_func=plan_route, 
+                routing_strategy_name=ROUTING_STRATEGY, # <--- 傳遞策略名稱
+                forbidden_cells_for_tasks=self.all_queue_spots
+            )
 
             # --- 2. 協調機器人移動以避免碰撞 ---
             approved_robot_ids = self.congestion_manager.coordinate_moves(list(self.robots.values()))
@@ -400,9 +413,9 @@ class SimulationEngine:
                 exit_pos = self.charge_exits.get(robot.position)
                 if exit_pos:
                     robot.position = exit_pos
-                    print(f"🤖 機器人 {robot.id} 充電後移動至出口 {exit_pos}。")
+                    print(f" 機器人 {robot.id} 充電後移動至出口 {exit_pos}。")
                 else:
-                    print(f"⚠️ 機器人 {robot.id} 在充電站 {robot.position} 找不到指定的出口！")
+                    print(f" 機器人 {robot.id} 在充電站 {robot.position} 找不到指定的出口！")
 
             # --- 5. 視覺化呈現 ---
             if self.visualize:
@@ -429,14 +442,14 @@ if __name__ == "__main__":
     # 'off': 關閉無頭模式 (顯示動畫)
     HEADLESS_MODE = 'on'  # <--- 在這裡修改
 
-    print("🚀 正在啟動倉儲模擬...")
+    print(" 正在啟動倉儲模擬...")
 
     # 根據設定決定是否啟用視覺化
     run_with_visualization = HEADLESS_MODE.lower() != 'on'
 
     if not run_with_visualization:
-        print("💨 已啟用無頭模式，將以最快速度運行。")
+        print(" 已啟用無頭模式，將以最快速度運行。")
 
     engine = SimulationEngine(visualize=run_with_visualization)
     engine.run()
-    print("✅ 模擬結束。")
+    print(" 模擬結束。")
