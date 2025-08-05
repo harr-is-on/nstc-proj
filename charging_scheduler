@@ -1,0 +1,314 @@
+# charging_scheduler.py
+"""
+多充電站調度管理器
+整合現有系統接口，提供NCS和MDCS充電站選擇策略
+"""
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'test'))
+
+import math
+from typing import TYPE_CHECKING, List, Dict, Optional, Tuple
+
+# 導入現有系統模組
+from charging_model import ChargingStation
+from warehouse_layout import get_station_locations
+
+# 充電站配置（適應harr版本的charging_model）
+CHARGING_STATION_CONFIG = {
+    "capacity": 1,
+    "charge_rate": 5,
+    "charging_threshold": 20,
+    "full_charge_level": 100,
+}
+
+if TYPE_CHECKING:
+    from robot_and_initial_state import Robot
+
+# 使用系統現有的類型定義
+Coord = Tuple[int, int]
+
+def euclidean_distance(pos1: Coord, pos2: Coord) -> float:
+    """計算兩點間的歐幾里得距離"""
+    return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
+
+class ExtendedChargingStation:
+    """
+    擴展的充電站類，包裝現有的ChargingStation並添加調度功能
+    """
+    
+    def __init__(self, station_id: str, position: Coord, **kwargs):
+        self.station_id = station_id
+        self.position = position  # 充電站位置
+        
+        # 使用現有系統的充電站實例
+        self.charging_station = ChargingStation(**CHARGING_STATION_CONFIG)
+        
+        # 充電配置
+        self.capacity = self.charging_station.capacity
+        self.charge_rate = CHARGING_STATION_CONFIG.get('charge_rate', 5)
+        
+    def is_available(self) -> bool:
+        """檢查是否有空位可立即開始充電"""
+        return len(self.charging_station.charging) < self.charging_station.capacity
+    
+    def get_queue_length(self) -> int:
+        """取得當前排隊長度"""
+        return len(self.charging_station.queue)
+    
+    def get_total_robots(self) -> int:
+        """取得充電站總機器人數量（充電中+排隊中）"""
+        return len(self.charging_station.charging) + len(self.charging_station.queue)
+    
+    def estimate_waiting_time(self, target_soc: float = 100.0) -> float:
+        """
+        估算新到達機器人的等待時間
+        使用MDCS正確算法：總缺額電力 / 充電速率
+        
+        Args:
+            target_soc: 目標電量百分比
+        """
+        if self.is_available():
+            return 0.0  # 有空位，無需等待
+        
+        # 計算充電中和排隊中機器人的總缺額電力
+        total_power_deficit = 0.0
+        
+        # 充電中的機器人
+        for robot in self.charging_station.charging:
+            current_battery = getattr(robot, 'battery_level', 50)  # 默認50%
+            deficit = target_soc - current_battery
+            if deficit > 0:
+                total_power_deficit += deficit
+        
+        # 排隊中的機器人  
+        for robot in self.charging_station.queue:
+            current_battery = getattr(robot, 'battery_level', 50)  # 默認50%
+            deficit = target_soc - current_battery
+            if deficit > 0:
+                total_power_deficit += deficit
+        
+        # 預估剩餘時間 = 總缺額電力 / 充電速率
+        estimated_time = total_power_deficit / self.charge_rate if self.charge_rate > 0 else 0.0
+        
+        return estimated_time
+    
+    def request_charging(self, robot: 'Robot') -> bool:
+        """委託給現有的充電站處理充電請求"""
+        self.charging_station.request_charging(robot)
+        return True
+    
+    def update(self) -> List['Robot']:
+        """委託給現有的充電站處理狀態更新"""
+        return self.charging_station.update()
+
+class ChargingStationManager:
+    """
+    多充電站管理器
+    
+    整合現有系統，負責：
+    1. 自動初始化2個充電站（從warehouse_layout獲取信息）
+    2. 根據NCS或MDCS策略選擇最適合的充電站
+    3. 提供與現有ChargingStation相同的接口
+    """
+    
+    def __init__(self, strategy: str = "NCS"):
+        self.stations: Dict[str, ExtendedChargingStation] = {}
+        self.strategy = strategy.upper()  # "NCS" 或 "MDCS"
+        
+        # 自動初始化充電站
+        self._initialize_stations()
+    
+    def _initialize_stations(self):
+        """從warehouse_layout自動初始化充電站"""
+        station_layout = get_station_locations()
+        charge_stations_info = station_layout.get('charge_stations', [])
+        
+        for station_info in charge_stations_info:
+            station_id = station_info['id']
+            position = station_info['pos']
+            
+            extended_station = ExtendedChargingStation(
+                station_id=station_id,
+                position=position
+            )
+            self.stations[station_id] = extended_station
+        
+        print(f"✅ 初始化了 {len(self.stations)} 個充電站: {list(self.stations.keys())}")
+        
+    def add_station(self, station: ExtendedChargingStation):
+        """新增充電站到系統中"""
+        self.stations[station.station_id] = station
+        
+    def get_stations_list(self) -> List[ExtendedChargingStation]:
+        """取得所有充電站的列表"""
+        return list(self.stations.values())
+    
+    def request_charging(self, robot: 'Robot') -> Optional[str]:
+        """
+        為機器人選擇充電站並安排充電
+        
+        Args:
+            robot: 需要充電的機器人
+            
+        Returns:
+            Optional[str]: 選中的充電站ID，若無法安排則回傳None
+        """
+        if not self.stations:
+            print("⚠️ 沒有可用的充電站")
+            return None
+            
+        # 根據策略選擇充電站
+        if self.strategy == "NCS":
+            selected_station = self._select_nearest_station(robot)
+        elif self.strategy == "MDCS":
+            selected_station = self._select_minimum_delay_station(robot)
+        else:
+            # 預設策略：選擇第一個可用的
+            selected_station = next(iter(self.stations.values()))
+            
+        # 嘗試在選中的充電站安排充電
+        if selected_station and selected_station.request_charging(robot):
+            print(f"🔋 機器人 {robot.id} 使用 {self.strategy} 策略選擇充電站 {selected_station.station_id}")
+            return selected_station.station_id
+        else:
+            print(f"⚠️ 無法為機器人 {robot.id} 安排充電")
+            return None
+    
+    def _select_nearest_station(self, robot: 'Robot') -> Optional[ExtendedChargingStation]:
+        """
+        NCS策略：選擇距離最近的充電站
+        
+        算法：計算機器人當前位置到各充電站的距離，選擇最近的
+        """
+        if not self.stations:
+            return None
+        
+        robot_position = robot.position
+        best_station = None
+        min_distance = float('inf')
+        
+        print(f"🔍 NCS策略為機器人 {robot.id} 選擇充電站:")
+        
+        for station in self.stations.values():
+            distance = euclidean_distance(robot_position, station.position)
+            print(f"  {station.station_id}: 距離 {distance:.1f}")
+            
+            # 選擇距離最近的充電站
+            if distance < min_distance:
+                min_distance = distance
+                best_station = station
+        
+        if best_station:
+            print(f"  ✅ 選擇 {best_station.station_id} (最短距離: {min_distance:.1f})")
+        
+        return best_station
+    
+    def _select_minimum_delay_station(self, robot: 'Robot') -> Optional[ExtendedChargingStation]:
+        """
+        MDCS策略：選擇總延遲最小的充電站
+        
+        正確算法：
+        1. Travel time = 距離 / 機器人速度
+        2. 預估剩餘時間 = (目標SOC - 充電中&排隊中機器人當前電力總和) / 充電速率
+        3. 總延遲 = Travel time + 預估剩餘時間
+        4. 選擇總延遲最小的充電站
+        """
+        if not self.stations:
+            return None
+        
+        best_station = None
+        min_total_delay = float('inf')
+        
+        robot_position = robot.position
+        robot_speed = getattr(robot, 'move_speed', 1)
+        target_soc = CHARGING_STATION_CONFIG.get('full_charge_level', 100)  # 目標SOC
+        
+        print(f"🔍 MDCS策略為機器人 {robot.id} 選擇充電站:")
+        
+        for station in self.stations.values():
+            # 1. 計算前往時間 (Travel time)
+            distance = euclidean_distance(robot_position, station.position)
+            travel_time = distance / robot_speed
+            
+            # 2. 計算預估剩餘時間（基於實際機器人電量）
+            estimated_remaining_time = station.estimate_waiting_time(target_soc)
+            
+            # 3. 計算總延遲
+            total_delay = travel_time + estimated_remaining_time
+            
+            print(f"  {station.station_id}: 距離{distance:.1f} -> 行駛時間{travel_time:.1f} + 預估剩餘時間{estimated_remaining_time:.1f} = 總延遲{total_delay:.1f}")
+            
+            # 4. 更新最佳選擇
+            if total_delay < min_total_delay:
+                min_total_delay = total_delay
+                best_station = station
+        
+        if best_station:
+            print(f"  ✅ 選擇 {best_station.station_id} (總延遲: {min_total_delay:.1f})")
+        
+        return best_station
+    
+    # 提供與現有ChargingStation相同的接口，以便無縫整合
+    def update(self) -> List['Robot']:
+        """更新所有充電站並收集完成充電的機器人"""
+        all_finished_robots = []
+        
+        for station in self.stations.values():
+            finished_robots = station.update()
+            all_finished_robots.extend(finished_robots)
+        
+        return all_finished_robots
+    
+    def get_system_status(self) -> Dict[str, Dict]:
+        """取得整個充電系統的狀態總覽"""
+        status = {}
+        
+        for station_id, station in self.stations.items():
+            charging_count = len(station.charging_station.charging)
+            status[station_id] = {
+                'position': station.position,
+                'charging_count': charging_count,
+                'queue_length': station.get_queue_length(),
+                'capacity': station.capacity,
+                'utilization': charging_count / station.capacity if station.capacity > 0 else 0,
+                'estimated_waiting': station.estimate_waiting_time()
+            }
+            
+        return status
+
+# 使用範例和測試功能
+def create_charging_system(strategy: str = "MDCS") -> ChargingStationManager:
+    """
+    創建充電站管理系統
+    
+    Args:
+        strategy: 充電站選擇策略，"NCS" 或 "MDCS"
+    
+    Returns:
+        ChargingStationManager: 初始化完成的充電站管理器
+    """
+    manager = ChargingStationManager(strategy=strategy)
+    return manager
+
+def demonstrate_system():
+    """演示系統功能"""
+    print("🔋 充電站調度系統演示")
+    print("=" * 50)
+    
+    # 創建MDCS策略的管理器
+    manager = create_charging_system("MDCS")
+    
+    # 顯示系統狀態
+    print("\n📊 系統狀態:")
+    status = manager.get_system_status()
+    for station_id, info in status.items():
+        print(f"  {station_id}: 位置{info['position']}, 容量{info['charging_count']}/{info['capacity']}, "
+              f"排隊{info['queue_length']}, 等待時間{info['estimated_waiting']:.1f}")
+    
+    print(f"\n✅ 充電站調度系統初始化完成，使用策略: {manager.strategy}")
+    return manager
+
+if __name__ == "__main__":
+    # 運行演示
+    demonstrate_system()
