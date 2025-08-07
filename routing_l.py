@@ -44,6 +44,7 @@ import numpy as np
 from warehouse_layout import (
     is_turn_point, find_nearest_turn_point
 )
+from routing import plan_route as plan_route_a_star # 匯入基礎 A* 演算法並重新命名
 
 # --- 型別別名，方便閱讀 ---
 Coord = Tuple[int, int]
@@ -74,7 +75,7 @@ def find_adjacent_aisle(pos: Coord, warehouse_matrix: np.ndarray) -> Optional[Co
     return None
 
 
-def plan_route_largest_gap(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
+def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
     """【核心策略函式】- Largest Gap 策略實作
     為機器人規劃一條從起點到終點的路徑。
     
@@ -163,67 +164,6 @@ def plan_route_largest_gap(start_pos, target_pos, warehouse_matrix, dynamic_obst
     return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
 
 
-def plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map):
-    """標準 A* 路徑規劃演算法 (原始實作)"""
-    rows, cols = warehouse_matrix.shape
-
-    def neighbors(pos: Coord) -> List[Coord]:
-        r, c = pos
-        candidates = [(r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)] # 四個方向
-        valid_neighbors = []
-        for nr, nc in candidates:
-            if 0 <= nr < rows and 0 <= nc < cols:
-                # 檢查動態障礙物 (除非它是我們的最終目標)
-                if dynamic_obstacles and (nr, nc) in dynamic_obstacles and (nr, nc) != target_pos:
-                    continue
-
-                # 檢查呼叫者提供的絕對禁止區域 (除非它是我們的最終目標)
-                if (nr, nc) in forbidden_cells and (nr, nc) != target_pos:
-                    continue
-
-                # 檢查靜態倉庫佈局。所有非障礙物的格子都是可通行的。
-                cell_type = warehouse_matrix[nr, nc]
-                if cell_type in [0, 4, 5, 6, 7] or (nr, nc) == target_pos:
-                    valid_neighbors.append((nr, nc))
-        return valid_neighbors
-
-    def heuristic(pos):
-        # 啟發函式 (Heuristic): 使用曼哈頓距離，這在網格地圖上通常很有效。
-        return abs(pos[0] - target_pos[0]) + abs(pos[1] - target_pos[1])
-
-    # --- A* 演算法主體 ---
-    open_list = [(heuristic(start_pos), 0, start_pos, [])]  # (f_score, g_score, pos, path)
-    closed_set = set()
-
-    while open_list:
-        f, g, current, path = heapq.heappop(open_list)
-
-        if current in closed_set:
-            continue
-
-        # 如果到達目標，重建並返回路徑
-        if current == target_pos:
-            # 根據「合約」，我們需要返回從「下一步」開始的路徑。
-            return (path + [current])[1:]
-
-        closed_set.add(current)
-
-        # 探索所有有效的鄰居節點
-        for neighbor in neighbors(current):
-            if neighbor in closed_set:
-                continue
-            
-            # 計算移動到鄰居的成本 (g_score)
-            move_cost = cost_map.get(neighbor, 1) if isinstance(cost_map.get(neighbor), int) else 1
-            new_g = g + move_cost
-            # 計算 f_score = g_score + h_score
-            new_f = new_g + heuristic(neighbor)
-            # 將鄰居節點加入優先佇列
-            heapq.heappush(open_list, (new_f, new_g, neighbor, path + [current]))
-
-    return None  # 如果 open_list 為空仍未找到路徑，則表示無解
-
-
 # --- Largest Gap 策略全域狀態管理 ---
 # 儲存每個機器人的 Largest Gap 路徑狀態
 # 格式: robot_position_key -> {"full_path": [...], "picks_remaining": [...], "current_target": Coord}
@@ -241,108 +181,76 @@ def clear_largest_gap_cache():
 
 def plan_largest_gap_complete_route(start_pos: Coord, pick_locations: List[Coord], warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord], cost_map: Dict) -> List[Coord]:
     """
-    實作完整 Largest Gap 路徑規劃
+    實作優化的「最近巷道優先」策略 (原 Largest Gap)，避免了跨倉儲的無效移動。
     
-    基於 largest_gap_n.py 的邏輯，適配到 nstc-proj-main 框架：
-    
-    Largest Gap 策略步驟：
-    1. 找距離最近的未撿貨點
-    2. 如果不在 turn point，先垂直移動到最近的 turn point
-    3. 水平移動到目標 sub road 所在列
-    4. 垂直移動到訂單位置並撿貨
-    5. 檢查同列是否有其他訂單可直接延伸撿貨（智慧延伸）
-    6. 如果無法延伸，返回最近 turn point
-    7. 重複步驟 1-6 直到撿完所有貨物
+    策略步驟：
+    1. 找出所有待處理的巷道。
+    2. 選擇離當前位置最近的一個巷道作為目標。
+    3. 進入該巷道，並以「進出式」撿完巷道內所有貨物。
+    4. 返回主幹道，並重複此過程，直到所有巷道清掃完畢。
     
     返回包含起點的完整路徑
     """
     if not pick_locations:
         return [start_pos]
     
-    remaining = pick_locations.copy()
+    remaining_picks = pick_locations.copy()
     path = [start_pos]
     curr = start_pos
     
-    print(f"🔄 開始 Largest Gap 路徑計算，起點: {start_pos}，撿貨點: {pick_locations}")
+    print(f"🔄 開始「最近巷道優先」路徑計算，起點: {start_pos}，撿貨點: {pick_locations}")
     
-    while remaining:
-        # 1. 找距離最近的未撿貨點
-        remaining.sort(key=lambda p: manhattan_distance(curr, p))
-        target = remaining[0]
-        print(f"  → 目標撿貨點: {target}")
+    while remaining_picks:
+        # 1. 找到包含最近撿貨點的巷道
+        nearest_pick = min(remaining_picks, key=lambda p: manhattan_distance(curr, p))
+        target_aisle_col = nearest_pick[1]
+        print(f"\n  → 目標巷道: {target_aisle_col} (因最近點 {nearest_pick})")
+
+        # 2. 找到該巷道的入口轉彎點
+        entry_turn = find_nearest_turn_point(curr)
+        target_entry_turn = (entry_turn[0], target_aisle_col)
+
+        # 3. 移動到入口轉彎點
+        if curr != target_entry_turn:
+            print(f"  → 前往巷道入口: {target_entry_turn}")
+            segment = a_star_internal_path(curr, target_entry_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
+            if segment and len(segment) > 1:
+                path.extend(segment[1:])
+            curr = target_entry_turn
+
+        # 4. 找出該巷道內的所有撿貨點，並按距離排序
+        aisle_picks_to_do = sorted(
+            [p for p in remaining_picks if p[1] == target_aisle_col],
+            key=lambda p: manhattan_distance(curr, p)
+        )
         
-        # 2. 如果不在 turn point，先移動到最近的 turn point
-        if not is_turn_point(curr):
-            turn_point = find_nearest_turn_point(curr)
-            if turn_point and turn_point != curr:
-                print(f"  → 移動到轉彎點: {turn_point}")
-                segment = a_star_internal_path(curr, turn_point, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-                if segment:
-                    if len(segment) > 1:
-                        path.extend(segment[1:])
-                    curr = turn_point
+        print(f"  → 清理巷道內 {len(aisle_picks_to_do)} 個貨物: {aisle_picks_to_do}")
         
-        # 3. 水平移動到目標 sub road 所在列
-        if curr[1] != target[1]:
-            horizontal_target = (curr[0], target[1])
-            print(f"  → 水平移動到: {horizontal_target}")
-            segment = a_star_internal_path(curr, horizontal_target, warehouse_matrix, dynamic_obstacles, forbidden_cells)
+        # 5. 逐一撿貨 (進出式)
+        picked_in_aisle = []
+        for pick_pos in aisle_picks_to_do:
+            segment = a_star_internal_path(curr, pick_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
             if segment:
                 if len(segment) > 1:
                     path.extend(segment[1:])
-                curr = horizontal_target
-        
-        # 4. 垂直移動到訂單位置並撿貨
-        if curr != target:
-            print(f"  → 移動到撿貨點: {target}")
-            segment = a_star_internal_path(curr, target, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-            if segment:
-                if len(segment) > 1:
-                    path.extend(segment[1:])
-                curr = target
+                curr = pick_pos
+                picked_in_aisle.append(pick_pos)
+                print(f"    ✅ 撿貨完成: {pick_pos}")
             else:
-                print(f"    ❌ 無法到達撊貨點: {target}")
-                remaining.remove(target)
-                continue
-        
-        # ✅ 完成一筆撿貨
-        remaining.remove(curr)
-        print(f"    ✅ 撤貨完成: {curr}")
-        
-        # 5. 檢查同列是否有其他訂單可直接延伸撿貨（智慧延伸）
-        next_same_col = [p for p in remaining if p[1] == curr[1]]
-        
-        if next_same_col:
-            # 找同列中距離最近的撤貨點
-            next_pick = min(next_same_col, key=lambda p: manhattan_distance(curr, p))
-            direction = 1 if next_pick[0] > curr[0] else -1
-            
-            print(f"  → 檢查同列延伸: {next_pick}, 方向: {'下' if direction == 1 else '上'}")
-            
-            # 檢查路徑是否暢通（無障礙物）
-            blocked = False
-            if direction != 0:
-                for r in range(curr[0] + direction, next_pick[0], direction):
-                    if warehouse_matrix[r, curr[1]] == 1:  # 貨架障礙
-                        blocked = True
-                        break
-                
-                if not blocked:
-                    print(f"    ✅ 路徑暢通，直接延伸到: {next_pick}")
-                    continue  # 不退回 turn point，直接進行下一次循環
-        
-        # 6. 否則才退回最近 turn point（如果還有剩餘撿貨點）
-        if remaining:
-            turn_point = find_nearest_turn_point(curr)
-            if turn_point and turn_point != curr:
-                print(f"  → 返回轉彎點: {turn_point}")
-                segment = a_star_internal_path(curr, turn_point, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-                if segment:
-                    if len(segment) > 1:
-                        path.extend(segment[1:])
-                    curr = turn_point
-    
-    print(f"🎉 Largest Gap 路徑計算完成，總長度: {len(path)}")
+                print(f"    ❌ 無法到達撿貨點: {pick_pos}")
+
+        # 6. 撿完後，返回入口轉彎點
+        if curr != target_entry_turn:
+            print(f"  → 返回巷道入口: {target_entry_turn}")
+            segment = a_star_internal_path(curr, target_entry_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
+            if segment and len(segment) > 1:
+                path.extend(segment[1:])
+            curr = target_entry_turn
+
+        # 7. 從剩餘列表中移除已完成的貨物
+        remaining_picks = [p for p in remaining_picks if p not in picked_in_aisle]
+
+    print(f"🎉 「最近巷道優先」路徑計算完成，總長度: {len(path)}")
     return path
 
 def a_star_internal_path(start: Coord, goal: Coord, warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord]) -> List[Coord]:

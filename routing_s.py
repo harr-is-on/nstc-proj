@@ -35,8 +35,8 @@ import math
 from typing import List, Tuple, Optional, Set, Dict
 import numpy as np
 from warehouse_layout import (
-    is_main_road, is_sub_road, is_turn_point, 
-    find_nearest_turn_point, get_road_type_info
+    is_turn_point,
+    find_nearest_turn_point
 )
 
 # --- 型別別名，方便閱讀 ---
@@ -64,7 +64,7 @@ def find_adjacent_aisle(pos: Coord, warehouse_matrix: np.ndarray) -> Optional[Co
     return None
 
 
-def plan_route_s_shape(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
+def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
     """【核心策略函式】- S-Shape 策略實作
     為機器人規劃一條從起點到終點的路徑。
     
@@ -95,7 +95,7 @@ def plan_route_s_shape(start_pos, target_pos, warehouse_matrix, dynamic_obstacle
     ---
     """
     # 調試信息：記錄路徑規劃的參數
-    print(f"🗺️ S-Shape 路徑規劃: {start_pos} -> {target_pos}")
+    print(f"S-Shape 路徑規劃: {start_pos} -> {target_pos}")
     
     # 初始化參數
     if forbidden_cells is None:
@@ -108,7 +108,7 @@ def plan_route_s_shape(start_pos, target_pos, warehouse_matrix, dynamic_obstacle
     # 檢查是否使用 S-shape 策略
     if 's_shape_picks' in cost_map and len(cost_map['s_shape_picks']) > 1:
         pick_locations = cost_map['s_shape_picks']
-        print(f"🔄 啟用 S-shape 策略，撿貨點: {pick_locations}")
+        print(f" 啟用 S-shape 策略，撿貨點: {pick_locations}")
         
         # 生成快取鍵值
         cache_key = get_robot_key(start_pos, pick_locations)
@@ -122,9 +122,9 @@ def plan_route_s_shape(start_pos, target_pos, warehouse_matrix, dynamic_obstacle
                     "full_path": full_path,
                     "picks": pick_locations.copy()
                 }
-                print(f"💾 快取 S-shape 路徑，共 {len(full_path)} 步")
+                print(f" 快取 S-shape 路徑，共 {len(full_path)} 步")
             else:
-                print("❌ S-shape 路徑規劃失敗，回退到 A* 演算法")
+                print(" S-shape 路徑規劃失敗，回退到 A* 演算法")
                 return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
         
         # 從快取中取得路徑並返回適當段落
@@ -140,13 +140,13 @@ def plan_route_s_shape(start_pos, target_pos, warehouse_matrix, dynamic_obstacle
                 end_idx = full_path.index(target_pos, start_idx)
                 # 返回從下一步到終點的路徑段
                 result_path = full_path[start_idx + 1:end_idx + 1]
-                print(f"📍 返回 S-shape 路徑段: {len(result_path)} 步")
+                print(f"返回 S-shape 路徑段: {len(result_path)} 步")
                 return result_path if result_path else None
             else:
-                print("⚠️ 目標點不在 S-shape 路徑中，回退到 A* 演算法")
+                print("目標點不在 S-shape 路徑中，回退到 A* 演算法")
                 return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
         except ValueError:
-            print("⚠️ 起點不在 S-shape 路徑中，回退到 A* 演算法")
+            print("起點不在 S-shape 路徑中，回退到 A* 演算法")
             return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
     
     # 不使用 S-shape 策略，使用標準 A* 演算法
@@ -232,64 +232,58 @@ def clear_s_shape_cache():
 def plan_s_shape_complete_route(start_pos: Coord, pick_locations: List[Coord], warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord], cost_map: Dict) -> List[Coord]:
     """
     實作完整 S-shape 路徑規劃
-    
-    基於 s_shape_d.py 的邏輯，適配到 nstc-proj-main 框架：
-    
+
+    此版本為純正的 S-Shape 策略，會依序由左至右清掃所有需要作業的巷道。
+
     S-Shape 策略步驟：
-    1. 如果不在 turn point，先垂直移動到最近的 turn point
-    2. 水平移動到目標 sub road 所在列
-    3. 沿當前方向撿完該 sub road 中的所有貨物
-    4. 繼續往該方向走到底部 turn point
-    5. 重複步驟 1-4 直到撿完所有貨物
-    
+    1. 找出所有需要撿貨的巷道 (sub roads)。
+    2. 依巷道順序 (由左至右) 進行排序。
+    3. 交替上下方向，清掃每個巷道內的所有貨物。
+    4. 從巷道一端進入，另一端離開，形成 S 形路徑。
+    5. 重複直到所有巷道清掃完畢。
+
     返回包含起點的完整路徑
     """
     if not pick_locations:
         return [start_pos]
-    
-    remaining = pick_locations.copy()
+
     path = [start_pos]
     curr = start_pos
-    
-    print(f"🔄 開始 S-shape 路徑計算，起點: {start_pos}，撿貨點: {pick_locations}")
-    
-    while remaining:
-        # 1. 找最近的撿貨點
-        remaining.sort(key=lambda p: abs(p[0] - curr[0]) + abs(p[1] - curr[1]))
-        target = remaining[0]
-        print(f"  → 目標撿貨點: {target}")
-        
-        # 2. 如果不在 turn point，先移動到最近的 turn point
-        if not is_turn_point(curr):
-            turn_point = find_nearest_turn_point(curr)
-            if turn_point and turn_point != curr:
-                print(f"  → 移動到轉彎點: {turn_point}")
-                segment = a_star_internal_path(curr, turn_point, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-                if segment and len(segment) > 1:
-                    path.extend(segment[1:])
-                    curr = turn_point
-        
-        # 3. 水平移動到目標 sub road 所在列
-        if curr[1] != target[1]:
-            horizontal_target = (curr[0], target[1])
-            print(f"  → 水平移動到: {horizontal_target}")
-            segment = a_star_internal_path(curr, horizontal_target, warehouse_matrix, dynamic_obstacles, forbidden_cells)
+
+    # 1. 找出所有需要撿貨的巷道並排序
+    remaining_picks = pick_locations.copy()
+    aisles_to_visit = sorted(list(set(p[1] for p in remaining_picks)))
+
+    print(f" 開始純正 S-shape 路徑計算，起點: {start_pos}，目標巷道: {aisles_to_visit}")
+
+    # 2. 交替清掃方向，1=向下, -1=向上
+    sweep_direction = 1
+
+    for aisle_col in aisles_to_visit:
+        print(f"\n  清掃巷道: {aisle_col}, 方向: {'下' if sweep_direction == 1 else '上'}")
+
+        # 3. 決定入口和出口轉彎點
+        if sweep_direction == 1: # 向下掃
+            entry_turn = find_nearest_turn_point((0, aisle_col), 'any')
+            exit_turn = find_nearest_turn_point((warehouse_matrix.shape[0]-1, aisle_col), 'any')
+        else: # 向上掃
+            entry_turn = find_nearest_turn_point((warehouse_matrix.shape[0]-1, aisle_col), 'any')
+            exit_turn = find_nearest_turn_point((0, aisle_col), 'any')
+
+        # 從當前位置移動到入口轉彎點
+        if curr != entry_turn:
+            print(f"  → 前往入口: {entry_turn}")
+            segment = a_star_internal_path(curr, entry_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
             if segment and len(segment) > 1:
                 path.extend(segment[1:])
-                curr = horizontal_target
+            curr = entry_turn
         
-        # 4. 沿當前方向撿完該 sub road 中的所有訂單
-        direction = -1 if target[0] < curr[0] else 1
-        cc = curr[1]
-        
-        # 找出該列中所有符合方向的撿貨點
+        # 4. 找出該巷道內的所有撿貨點，並根據清掃方向排序
         aisle_picks = sorted(
-            [p for p in remaining if p[1] == cc and (p[0] - curr[0]) * direction >= 0],
+            [p for p in remaining_picks if p[1] == aisle_col],
             key=lambda p: p[0],
-            reverse=(direction == -1)
+            reverse=(sweep_direction == -1)
         )
-        
-        print(f"  → 該列撿貨點: {aisle_picks}，方向: {'上' if direction == -1 else '下'}")
         
         # 逐一撿貨
         for pick_pos in aisle_picks:
@@ -298,21 +292,26 @@ def plan_s_shape_complete_route(start_pos: Coord, pick_locations: List[Coord], w
                 if len(segment) > 1:
                     path.extend(segment[1:])
                 curr = pick_pos
-                remaining.remove(pick_pos)
-                print(f"    ✅ 撿貨完成: {pick_pos}")
+                # 從剩餘清單中移除已撿的貨物
+                if pick_pos in remaining_picks:
+                    remaining_picks.remove(pick_pos)
+                print(f"     撿貨完成: {pick_pos}")
             else:
-                print(f"    ❌ 無法到達撊貨點: {pick_pos}")
-                remaining.remove(pick_pos)  # 移除無法到達的撊貨點
+                print(f"    無法到達撿貨點: {pick_pos}")
+                # 同樣移除無法到達的點，避免重複嘗試
+                if pick_pos in remaining_picks:
+                    remaining_picks.remove(pick_pos)
         
-        # 5. 繼續往該方向移動到 turn point（如果還有剩餘撿貨點）
-        if remaining:
-            next_turn = find_nearest_turn_point(curr, 'down' if direction == 1 else 'up')
-            if next_turn and next_turn != curr:
-                print(f"  → 移動到下一個轉彎點: {next_turn}")
-                segment = a_star_internal_path(curr, next_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-                if segment and len(segment) > 1:
-                    path.extend(segment[1:])
-                    curr = next_turn
+        # 5. 撿完後，移動到出口轉彎點
+        if curr != exit_turn:
+            print(f"  → 前往出口: {exit_turn}")
+            segment = a_star_internal_path(curr, exit_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
+            if segment and len(segment) > 1:
+                path.extend(segment[1:])
+            curr = exit_turn
+
+        # 6. 反轉清掃方向，為下一個巷道做準備
+        sweep_direction *= -1
     
     print(f"🎉 S-shape 路徑計算完成，總長度: {len(path)}")
     return path

@@ -45,6 +45,7 @@ import numpy as np
 from warehouse_layout import (
     is_turn_point, find_nearest_turn_point
 )
+from routing import plan_route as plan_route_a_star # 匯入基礎 A* 演算法並重新命名
 
 # --- 型別別名，方便閱讀 ---
 Coord = Tuple[int, int]
@@ -94,7 +95,7 @@ def pick_exit_based_on_next(curr: Coord, col: int, warehouse_matrix: np.ndarray,
     else:
         return curr
 
-def plan_route_composite(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
+def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
     """【核心策略函式】- 混合策略實作
     為機器人規劃一條從起點到終點的路徑。
     
@@ -139,7 +140,7 @@ def plan_route_composite(start_pos, target_pos, warehouse_matrix, dynamic_obstac
     if 'composite_picks' in cost_map and len(cost_map['composite_picks']) > 1:
         pick_locations = cost_map['composite_picks']
         neighbor_threshold = cost_map.get('neighbor_threshold', 2)  # 緊鄰閾值
-        print(f"🔄 啟用混合策略，撿貨點: {pick_locations}，緊鄰閾值: {neighbor_threshold}")
+        print(f" 啟用混合策略，撿貨點: {pick_locations}，緊鄰閾值: {neighbor_threshold}")
         
         # 生成快取鍵值
         cache_key = get_robot_key(start_pos, pick_locations, neighbor_threshold)
@@ -153,9 +154,9 @@ def plan_route_composite(start_pos, target_pos, warehouse_matrix, dynamic_obstac
                     "full_path": full_path,
                     "picks": pick_locations.copy()
                 }
-                print(f"💾 快取混合策略路徑，共 {len(full_path)} 步")
+                print(f" 快取混合策略路徑，共 {len(full_path)} 步")
             else:
-                print("❌ 混合策略路徑規劃失敗，回退到 A* 演算法")
+                print(" 混合策略路徑規劃失敗，回退到 A* 演算法")
                 return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
         
         # 從快取中取得路徑並返回適當段落
@@ -171,78 +172,17 @@ def plan_route_composite(start_pos, target_pos, warehouse_matrix, dynamic_obstac
                 end_idx = full_path.index(target_pos, start_idx)
                 # 返回從下一步到終點的路徑段
                 result_path = full_path[start_idx + 1:end_idx + 1]
-                print(f"📍 返回混合策略路徑段: {len(result_path)} 步")
+                print(f" 返回混合策略路徑段: {len(result_path)} 步")
                 return result_path if result_path else None
             else:
-                print("⚠️ 目標點不在混合策略路徑中，回退到 A* 演算法")
+                print("目標點不在混合策略路徑中，回退到 A* 演算法")
                 return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
         except ValueError:
-            print("⚠️ 起點不在混合策略路徑中，回退到 A* 演算法")
+            print(" 起點不在混合策略路徑中，回退到 A* 演算法")
             return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
     
     # 不使用混合策略，使用標準 A* 演算法
     return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-
-
-def plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map):
-    """標準 A* 路徑規劃演算法 (原始實作)"""
-    rows, cols = warehouse_matrix.shape
-
-    def neighbors(pos: Coord) -> List[Coord]:
-        r, c = pos
-        candidates = [(r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)] # 四個方向
-        valid_neighbors = []
-        for nr, nc in candidates:
-            if 0 <= nr < rows and 0 <= nc < cols:
-                # 檢查動態障礙物 (除非它是我們的最終目標)
-                if dynamic_obstacles and (nr, nc) in dynamic_obstacles and (nr, nc) != target_pos:
-                    continue
-
-                # 檢查呼叫者提供的絕對禁止區域 (除非它是我們的最終目標)
-                if (nr, nc) in forbidden_cells and (nr, nc) != target_pos:
-                    continue
-
-                # 檢查靜態倉庫佈局。所有非障礙物的格子都是可通行的。
-                cell_type = warehouse_matrix[nr, nc]
-                if cell_type in [0, 4, 5, 6, 7] or (nr, nc) == target_pos:
-                    valid_neighbors.append((nr, nc))
-        return valid_neighbors
-
-    def heuristic(pos):
-        # 啟發函式 (Heuristic): 使用曼哈頓距離，這在網格地圖上通常很有效。
-        return abs(pos[0] - target_pos[0]) + abs(pos[1] - target_pos[1])
-
-    # --- A* 演算法主體 ---
-    open_list = [(heuristic(start_pos), 0, start_pos, [])]  # (f_score, g_score, pos, path)
-    closed_set = set()
-
-    while open_list:
-        f, g, current, path = heapq.heappop(open_list)
-
-        if current in closed_set:
-            continue
-
-        # 如果到達目標，重建並返回路徑
-        if current == target_pos:
-            # 根據「合約」，我們需要返回從「下一步」開始的路徑。
-            return (path + [current])[1:]
-
-        closed_set.add(current)
-
-        # 探索所有有效的鄰居節點
-        for neighbor in neighbors(current):
-            if neighbor in closed_set:
-                continue
-            
-            # 計算移動到鄰居的成本 (g_score)
-            move_cost = cost_map.get(neighbor, 1) if isinstance(cost_map.get(neighbor), int) else 1
-            new_g = g + move_cost
-            # 計算 f_score = g_score + h_score
-            new_f = new_g + heuristic(neighbor)
-            # 將鄰居節點加入優先佇列
-            heapq.heappush(open_list, (new_f, new_g, neighbor, path + [current]))
-
-    return None  # 如果 open_list 為空仍未找到路徑，則表示無解
 
 
 # --- 混合策略全域狀態管理 ---
@@ -286,7 +226,7 @@ def plan_composite_complete_route(start_pos: Coord, pick_locations: List[Coord],
     curr = start_pos
     neighbor_threshold = cost_map.get('neighbor_threshold', 2)
     
-    print(f"🔄 開始混合策略路徑計算，起點: {start_pos}，撿貨點: {pick_locations}")
+    print(f" 開始混合策略路徑計算，起點: {start_pos}，撿貨點: {pick_locations}")
     
     while remaining:
         # 1. 選擇距離最近的撿貨點
@@ -333,11 +273,11 @@ def plan_composite_complete_route(start_pos: Coord, pick_locations: List[Coord],
                         if len(segment) > 1:
                             path.extend(segment[1:])
                         curr = pick_pos
-                        picked_now.append(curr)
-                        print(f"    ✅ 撿貨完成: {curr}")
+                        picked_now.apend(curr)
+                        print(f"     撿貨完成: {curr}")
             elif len(aisle_orders) >= 3:
                 # 完整穿越策略
-                print(f"  🚀 完整穿越策略：撿完 {len(aisle_orders)} 個貨物")
+                print(f"   完整穿越策略：撿完 {len(aisle_orders)} 個貨物")
                 seq = aisle_orders if curr[0] <= aisle_orders[0][0] else list(reversed(aisle_orders))
                 for pick_pos in seq:
                     segment = a_star_internal_path(curr, pick_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
@@ -346,7 +286,7 @@ def plan_composite_complete_route(start_pos: Coord, pick_locations: List[Coord],
                             path.extend(segment[1:])
                         curr = pick_pos
                         picked_now.append(curr)
-                        print(f"    ✅ 撿貨完成: {curr}")
+                        print(f"     撿貨完成: {curr}")
                 
                 # 選擇最佳出口（基於下一目標）
                 remaining_after_picks = [p for p in remaining if p not in aisle_orders]
@@ -361,17 +301,20 @@ def plan_composite_complete_route(start_pos: Coord, pick_locations: List[Coord],
                         curr = exit_turn
             else:
                 # 入口側策略
-                print(f"  🎯 入口側策略：撿貨後返回入口")
-                pick_pos = aisle_orders[0]
-                segment = a_star_internal_path(curr, pick_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-                if segment:
-                    if len(segment) > 1:
-                        path.extend(segment[1:])
-                    curr = pick_pos
-                    picked_now.append(curr)
-                    print(f"    ✅ 撿貨完成: {curr}")
+                # 此策略適用於巷道內有2個且分佈較遠的貨物。修正了原先只撿一個就返回的缺陷。
+                print(f"   入口側策略：撿完 {len(aisle_orders)} 個貨物後返回入口")
+                # 決定撿貨順序
+                seq = aisle_orders if curr[0] <= aisle_orders[0][0] else list(reversed(aisle_orders))
+                for pick_pos in seq:
+                    segment = a_star_internal_path(curr, pick_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
+                    if segment:
+                        if len(segment) > 1:
+                            path.extend(segment[1:])
+                        curr = pick_pos
+                        picked_now.append(curr)
+                        print(f"     撿貨完成: {curr}")
                 
-                # 返回入口轉彎點
+                # 撿完該巷道的所有目標後，再返回入口轉彎點
                 entry_turn = find_nearest_turn_point(curr)
                 if entry_turn and entry_turn != curr:
                     segment = a_star_internal_path(curr, entry_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
@@ -381,14 +324,14 @@ def plan_composite_complete_route(start_pos: Coord, pick_locations: List[Coord],
                         curr = entry_turn
         else:
             # 單一貨物
-            print(f"  🎯 單一貨物策略")
+            print(f"   單一貨物策略")
             pick_pos = aisle_orders[0]
             segment = a_star_internal_path(curr, pick_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
             if segment and len(segment) > 1:
                 path.extend(segment[1:])
                 curr = pick_pos
                 picked_now.append(curr)
-                print(f"    ✅ 撿貨完成: {curr}")
+                print(f"     撿貨完成: {curr}")
             
             # 返回入口轉彎點
             entry_turn = find_nearest_turn_point(curr)
@@ -419,61 +362,27 @@ def plan_composite_complete_route(start_pos: Coord, pick_locations: List[Coord],
                         path.extend(segment[1:])
                     curr = p
                     remaining.remove(p)
-                    print(f"    ✅ 順路撿貨: {p}")
+                    print(f"     順路撿貨: {p}")
     
-    print(f"🎉 混合策略路徑計算完成，總長度: {len(path)}")
+    print(f" 混合策略路徑計算完成，總長度: {len(path)}")
     return path
 
 def a_star_internal_path(start: Coord, goal: Coord, warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord]) -> List[Coord]:
-    """A* 路徑搜尋，專用於混合策略內部路徑規劃"""
+    """
+    A* 路徑搜尋，專用於混合策略內部路徑規劃。
+    此版本調用共享的 A* 實作，並將結果包裝成包含起點的完整路徑。
+    """
     if start == goal:
         return [start]
     
-    rows, cols = warehouse_matrix.shape
+    # 基礎 A* 演算法返回的是從「下一步」開始的路徑段
+    path_segment = plan_route_a_star(start, goal, warehouse_matrix, dynamic_obstacles, forbidden_cells, None)
     
-    def neighbors(pos: Coord) -> List[Coord]:
-        r, c = pos
-        candidates = [(r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)]
-        valid = []
-        for nr, nc in candidates:
-            if 0 <= nr < rows and 0 <= nc < cols:
-                # 檢查動態障礙物
-                if (nr, nc) in dynamic_obstacles and (nr, nc) != goal:
-                    continue
-                # 檢查禁止區域
-                if (nr, nc) in forbidden_cells and (nr, nc) != goal:
-                    continue
-                # 檢查倉庫佈局
-                cell_type = warehouse_matrix[nr, nc]
-                if cell_type in [0, 4, 5, 6, 7] or (nr, nc) == goal:
-                    valid.append((nr, nc))
-        return valid
+    if path_segment:
+        # 將起點加到路徑開頭，以符合內部邏輯的預期格式
+        return [start] + path_segment
     
-    def heuristic(pos):
-        return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
-    
-    open_list = [(heuristic(start), 0, start, [start])]
-    closed_set = set()
-    
-    while open_list:
-        f, g, current, path = heapq.heappop(open_list)
-        
-        if current in closed_set:
-            continue
-            
-        if current == goal:
-            return path
-            
-        closed_set.add(current)
-        
-        for neighbor in neighbors(current):
-            if neighbor in closed_set:
-                continue
-            new_g = g + 1
-            new_f = new_g + heuristic(neighbor)
-            heapq.heappush(open_list, (new_f, new_g, neighbor, path + [neighbor]))
-    
-    return []  # 無路徑
+    return []  # 如果找不到路徑
 
 # --- 使用範例和測試函式 ---
 
