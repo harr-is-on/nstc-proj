@@ -1,224 +1,267 @@
 
-
-import heapq
-import math
-from typing import List, Tuple, Optional, Set, Dict
+from typing import List, Tuple, Dict, Optional
 import numpy as np
-from warehouse_layout import (
-    is_turn_point, find_nearest_turn_point
-)
-from routing import plan_route as plan_route_a_star # 匯入基礎 A* 演算法並重新命名
+from routing import plan_route as base_plan_route
+from routing import euclidean_distance, find_adjacent_aisle
 
-# --- 型別別名，方便閱讀 ---
+"""Largest Gap演算法: 依貨位分佈，動態決定揀貨順序，確保利用同端進出撿貨策略之優勢
+運算邏輯：
+1.將倉庫區分成上下兩區塊，區塊間區分成front/back兩組
+2.每個塊會有一個「貫穿走道」，用來連接兩端(front/back)的貨位
+3.假設機器人出發點在倉庫最右側(假設剛結束充電任務/揀貨任務)
+4.機器人會環繞倉庫進行類似C形揀貨路徑(右→左→右)，確保最後趟次方向向右可以順路撿貨回到撿貨區
+5.檢貨順序決定:如果機器人起始位置在UPPER，則順序為 UPPER BACK - UPPER FRONT - LOWER FRONT - LOWER BACK ，反之則 LOWER BACK - LOWER FRONT - UPPER FRONT - UPPER BACK
+6.貫穿走道的選擇: 在確定揀貨順序後，機器人會選擇最適合的貫穿走道，以最小化總路徑成本，貫穿走道的評分機制，主要考慮以下幾點：
+   - AP 數量：貫穿走道上可通行的 AP 數量越多，得分越高(值得採取貫穿取貨，一條龍撿貨到底)
+   - 同時有 front 與 back：若貫穿走道同時連接 front 與 back，則額外加分(由於頭尾皆有貨物，機器人可以在同一趟次完成撿貨)
+   - 走道位置：走道位置越靠近機器人起始位置，得分越高
+7.除了貫穿走道以外的貨物，機器人皆採取同側進出撿貨策略
+"""
 Coord = Tuple[int, int]
+AISLE_CODES = {0, 7}  # 0=走道, 7=撿貨出口
 
-def euclidean_distance(pos1: Coord, pos2: Coord) -> float:
-    """【輔助函式】計算兩點之間的歐幾里得距離。"""
-    return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
+def in_upper(y: int) -> bool: return 0 <= y <= 6
+def in_lower(y: int) -> bool: return 7 <= y <= 13
 
-def manhattan_distance(pos1: Coord, pos2: Coord) -> int:
-    """計算兩點之間的曼哈頓距離"""
-    return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+def classify_group(y: int) -> str:
+    if 0 <= y <= 3: return "upper_back"
+    if 4 <= y <= 6: return "upper_front"
+    if 7 <= y <= 9: return "lower_front"
+    return "lower_back"
 
-def find_adjacent_aisle(pos: Coord, warehouse_matrix: np.ndarray) -> Optional[Coord]:
-    
-    rows, cols = warehouse_matrix.shape
-    r, c = pos
-    candidates = [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
-    for nr, nc in candidates:
-        if 0 <= nr < rows and 0 <= nc < cols and warehouse_matrix[nr, nc] == 0:
-            return (nr, nc)
+def half_from_group(g: str) -> str:
+    return "upper" if g.startswith("upper_") else "lower"
+
+def get_access_point(wm: np.ndarray, shelf: Coord) -> Optional[Coord]:
+    """回傳貨位左右相鄰的走道(AP)；只取可通行(0/7)。"""
+    r, c = shelf
+    rows, cols = wm.shape
+    if c-1 >= 0 and wm[r, c-1] in AISLE_CODES: return (r, c-1)
+    if c+1 < cols and wm[r, c+1] in AISLE_CODES: return (r, c+1)
     return None
 
-
-def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
-    
-    # 調試信息：記錄路徑規劃的參數
-    print(f"🗺️ Largest Gap 路徑規劃: {start_pos} -> {target_pos}")
-    
-    # 初始化參數
-    if forbidden_cells is None:
-        forbidden_cells = set()
-    if cost_map is None:
-        cost_map = {}
-    if dynamic_obstacles is None:
-        dynamic_obstacles = []
-
-    # 檢查是否使用 Largest Gap 策略
-    if 'largest_gap_picks' in cost_map and len(cost_map['largest_gap_picks']) > 1:
-        pick_locations = cost_map['largest_gap_picks']
-        print(f"🔄 啟用 Largest Gap 策略，撿貨點: {pick_locations}")
-        
-        # 生成快取鍵值
-        cache_key = get_robot_key(start_pos, pick_locations)
-        
-        # 檢查快取
-        if cache_key not in _largest_gap_cache:
-            # 計算完整的 Largest Gap 路徑
-            full_path = plan_largest_gap_complete_route(start_pos, pick_locations, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-            if full_path:
-                _largest_gap_cache[cache_key] = {
-                    "full_path": full_path,
-                    "picks": pick_locations.copy()
-                }
-                print(f"💾 快取 Largest Gap 路徑，共 {len(full_path)} 步")
-            else:
-                print("❌ Largest Gap 路徑規劃失敗，回退到 A* 演算法")
-                return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-        
-        # 從快取中取得路徑並返回適當段落
-        cached_data = _largest_gap_cache[cache_key]
-        full_path = cached_data["full_path"]
-        
-        try:
-            # 找到起點在完整路徑中的位置
-            start_idx = full_path.index(start_pos)
-            
-            # 找到終點在完整路徑中的位置
-            if target_pos in full_path[start_idx:]:
-                end_idx = full_path.index(target_pos, start_idx)
-                # 返回從下一步到終點的路徑段
-                result_path = full_path[start_idx + 1:end_idx + 1]
-                print(f"📍 返回 Largest Gap 路徑段: {len(result_path)} 步")
-                return result_path if result_path else None
-            else:
-                print("⚠️ 目標點不在 Largest Gap 路徑中，回退到 A* 演算法")
-                return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-        except ValueError:
-            print("⚠️ 起點不在 Largest Gap 路徑中，回退到 A* 演算法")
-            return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-    
-    # 不使用 Largest Gap 策略，使用標準 A* 演算法
-    return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-
-
-# --- Largest Gap 策略全域狀態管理 ---
-# 儲存每個機器人的 Largest Gap 路徑狀態
-# 格式: robot_position_key -> {"full_path": [...], "picks_remaining": [...], "current_target": Coord}
-_largest_gap_cache = {}
-
-def get_robot_key(start_pos: Coord, picks: List[Coord]) -> str:
-    """生成機器人狀態的唯一鍵值"""
-    picks_str = "_".join([f"{p[0]}-{p[1]}" for p in sorted(picks)])
-    return f"{start_pos[0]}-{start_pos[1]}_{picks_str}"
-
-def clear_largest_gap_cache():
-    """清除所有 Largest Gap 快取"""
-    global _largest_gap_cache
-    _largest_gap_cache = {}
-
-def plan_largest_gap_complete_route(start_pos: Coord, pick_locations: List[Coord], warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord], cost_map: Dict) -> List[Coord]:
-    
-    if not pick_locations:
-        return [start_pos]
-    
-    remaining_picks = pick_locations.copy()
-    path = [start_pos]
-    curr = start_pos
-    
-    print(f"🔄 開始「最近巷道優先」路徑計算，起點: {start_pos}，撿貨點: {pick_locations}")
-    
-    while remaining_picks:
-        # 1. 找到包含最近撿貨點的巷道
-        nearest_pick = min(remaining_picks, key=lambda p: manhattan_distance(curr, p))
-        target_aisle_col = nearest_pick[1]
-        print(f"\n  → 目標巷道: {target_aisle_col} (因最近點 {nearest_pick})")
-
-        # 2. 找到該巷道的入口轉彎點
-        entry_turn = find_nearest_turn_point(curr)
-        target_entry_turn = (entry_turn[0], target_aisle_col)
-
-        # 3. 移動到入口轉彎點
-        if curr != target_entry_turn:
-            print(f"  → 前往巷道入口: {target_entry_turn}")
-            segment = a_star_internal_path(curr, target_entry_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-            if segment and len(segment) > 1:
-                path.extend(segment[1:])
-            curr = target_entry_turn
-
-        # 4. 找出該巷道內的所有撿貨點，並按距離排序
-        aisle_picks_to_do = sorted(
-            [p for p in remaining_picks if p[1] == target_aisle_col],
-            key=lambda p: manhattan_distance(curr, p)
-        )
-        
-        print(f"  → 清理巷道內 {len(aisle_picks_to_do)} 個貨物: {aisle_picks_to_do}")
-        
-        # 5. 逐一撿貨 (進出式)
-        picked_in_aisle = []
-        for pick_pos in aisle_picks_to_do:
-            segment = a_star_internal_path(curr, pick_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-            if segment:
-                if len(segment) > 1:
-                    path.extend(segment[1:])
-                curr = pick_pos
-                picked_in_aisle.append(pick_pos)
-                print(f"    ✅ 撿貨完成: {pick_pos}")
-            else:
-                print(f"    ❌ 無法到達撿貨點: {pick_pos}")
-
-        # 6. 撿完後，返回入口轉彎點
-        if curr != target_entry_turn:
-            print(f"  → 返回巷道入口: {target_entry_turn}")
-            segment = a_star_internal_path(curr, target_entry_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-            if segment and len(segment) > 1:
-                path.extend(segment[1:])
-            curr = target_entry_turn
-
-        # 7. 從剩餘列表中移除已完成的貨物
-        remaining_picks = [p for p in remaining_picks if p not in picked_in_aisle]
-
-    print(f"🎉 「最近巷道優先」路徑計算完成，總長度: {len(path)}")
-    return path
-
-def a_star_internal_path(start: Coord, goal: Coord, warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord]) -> List[Coord]:
-    """A* 路徑搜尋，專用於 Largest Gap 內部路徑規劃"""
-    if start == goal:
-        return [start]
-    
-    rows, cols = warehouse_matrix.shape
-    
-    def neighbors(pos: Coord) -> List[Coord]:
-        r, c = pos
-        candidates = [(r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)]
-        valid = []
-        for nr, nc in candidates:
-            if 0 <= nr < rows and 0 <= nc < cols:
-                # 檢查動態障礙物
-                if (nr, nc) in dynamic_obstacles and (nr, nc) != goal:
-                    continue
-                # 檢查禁止區域
-                if (nr, nc) in forbidden_cells and (nr, nc) != goal:
-                    continue
-                # 檢查倉庫佈局
-                cell_type = warehouse_matrix[nr, nc]
-                if cell_type in [0, 4, 5, 6, 7] or (nr, nc) == goal:
-                    valid.append((nr, nc))
-        return valid
-    
-    def heuristic(pos):
-        return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
-    
-    open_list = [(heuristic(start), 0, start, [start])]
-    closed_set = set()
-    
-    while open_list:
-        f, g, current, path = heapq.heappop(open_list)
-        
-        if current in closed_set:
+def build_index(items: List[Coord], wm: np.ndarray):
+    """半區→走道x→各組貨位清單；以及每個貨位的 AP 對應表。"""
+    aisles: Dict[str, Dict[int, Dict[str, List[Coord]]]] = {"upper": {}, "lower": {}}
+    ap_of: Dict[Coord, Coord] = {}
+    for it in items:
+        ap = get_access_point(wm, it)
+        if ap is None:
             continue
-            
-        if current == goal:
-            return path
-            
-        closed_set.add(current)
-        
-        for neighbor in neighbors(current):
-            if neighbor in closed_set:
-                continue
-            new_g = g + 1
-            new_f = new_g + heuristic(neighbor)
-            heapq.heappush(open_list, (new_f, new_g, neighbor, path + [neighbor]))
-    
-    return []  # 無路徑
+        ap_of[it] = ap
+        ax = ap[1]
+        g = classify_group(it[0])
+        half = half_from_group(g)
+        if ax not in aisles[half]:
+            aisles[half][ax] = {"upper_front": [], "upper_back": [], "lower_front": [], "lower_back": []}
+        aisles[half][ax][g].append(it)
+    return {"aisles": aisles, "ap_of": ap_of}
+
+def pick_through_aisle(half: str, half_dict: Dict[int, Dict[str, List[Coord]]]) -> Optional[int]:
+    """走道分數：AP 數量 +（同時有 front 與 back 再 +2）；同分取 x 較大。"""
+    if not half_dict: return None
+    best_x, best_score = None, -1
+    for x, groups in half_dict.items():
+        n_ap = len(groups["upper_front"]) + len(groups["upper_back"]) + len(groups["lower_front"]) + len(groups["lower_back"])
+        if half == "upper":
+            has_front = len(groups["upper_front"]) > 0
+            has_back  = len(groups["upper_back"])  > 0
+        else:
+            has_front = len(groups["lower_front"]) > 0
+            has_back  = len(groups["lower_back"])  > 0
+        score = n_ap + (2 if (has_front and has_back) else 0)
+        if (score > best_score) or (score == best_score and (best_x is None or x > best_x)):
+            best_x, best_score = x, score
+    return best_x
+
+# ---- 單走道內的撿取順序（同端進出）----
+def order_same_end(group: str, items: List[Coord]) -> List[Coord]:
+    if group == "upper_back":   return sorted(items, key=lambda p: p[0])   # 0→3
+    if group == "upper_front":  return sorted(items, key=lambda p: -p[0])  # 6→4
+    if group == "lower_front":  return sorted(items, key=lambda p: p[0])   # 7→9
+    return sorted(items, key=lambda p: -p[0])                              # lower_back: 13→10
+
+# ---- 貫穿走道：沿行進方向排序（確保走到誰先、就先撿誰）----
+def order_through_along_direction(half: str, groups: Dict[str, List[Coord]], back_to_front: bool) -> List[Coord]:
+    pts: List[Coord] = []
+    if half == "upper":
+        pts += groups.get("upper_back", [])
+        pts += groups.get("upper_front", [])
+        # 第一半區貫穿：back->front，用 y 由小到大
+        return sorted(pts, key=lambda p: p[0]) if back_to_front else sorted(pts, key=lambda p: p[0], reverse=True)
+    else:
+        pts += groups.get("lower_front", [])
+        pts += groups.get("lower_back", [])
+        # 第二半區貫穿：front->back，用 y 由小到大
+        return sorted(pts, key=lambda p: p[0]) if not back_to_front else sorted(pts, key=lambda p: p[0], reverse=True)
+
+# ---- 非貫穿走道掃描：從「邊緣」單向掃描 ----
+def scan_non_through(half: str, group_key: str, half_dict: Dict[int, Dict[str, List[Coord]]],
+                     through_x: int, mode: str) -> List[Coord]:
+    """
+    mode:
+      - 'towards_through_from_farthest': 從距離 through 最遠的走道開始，朝 through 方向掃描
+      - 'outward_from_through_nearest': 從距離 through 最近的一側開始，往外掃描（單側）
+    """
+    xs_all = [x for x, g in half_dict.items() if x != through_x and len(g.get(group_key, [])) > 0]
+    if not xs_all:
+        return []
+    ordered_items: List[Coord] = []
+
+    if mode == 'towards_through_from_farthest':
+        start_x = max(xs_all, key=lambda x: abs(x - through_x))
+        dir_sign = 1 if start_x < through_x else -1
+        xs_side = [x for x in xs_all if (x - through_x) * dir_sign < 0]
+        xs_side_sorted = sorted(xs_side, key=lambda x: abs(x - through_x), reverse=True)  # 遠→近
+        for x in xs_side_sorted:
+            ordered_items += order_same_end(group_key, half_dict[x][group_key])
+        return ordered_items
+
+    # outward_from_through_nearest
+    left_candidates  = [x for x in xs_all if x < through_x]
+    right_candidates = [x for x in xs_all if x > through_x]
+    dist_left  = (through_x - max(left_candidates)) if left_candidates else None
+    dist_right = (min(right_candidates) - through_x) if right_candidates else None
+
+    if dist_left is not None and (dist_right is None or dist_left <= dist_right):
+        xs_side = sorted(left_candidates, key=lambda x: (through_x - x))  # 近→遠
+    else:
+        xs_side = sorted(right_candidates, key=lambda x: (x - through_x))  # 近→遠
+
+    for x in xs_side:
+        ordered_items += order_same_end(group_key, half_dict[x][group_key])
+    return ordered_items
+
+def reorder_task_items(robot_start: Coord, shelf_locations: List[Coord], wm: np.ndarray) -> List[Coord]:
+    """依照線性掃描規則產生貨位訪問順序（僅回傳貨位，不含 AP）。"""
+    if not shelf_locations: return []
+    idx = build_index(shelf_locations, wm)
+    aisles = idx["aisles"]
+
+    start_half = "upper" if in_upper(robot_start[0]) else "lower"
+    other_half = "lower" if start_half == "upper" else "upper"
+
+    def make_half_order(half: str, phase: str) -> List[Coord]:
+        hd = aisles[half]
+        if not hd: return []
+        through_x = pick_through_aisle(half, hd)
+        ordered: List[Coord] = []
+
+        if half == "upper":
+            back_key, front_key = "upper_back", "upper_front"
+        else:
+            back_key, front_key = "lower_back", "lower_front"
+
+        if phase == "first":  # 第一半區
+            ordered += scan_non_through(half, back_key,  hd, through_x, mode='towards_through_from_farthest')
+            if through_x is not None:
+                ordered += order_through_along_direction(half, hd[through_x], back_to_front=True)
+            ordered += scan_non_through(half, front_key, hd, through_x, mode='outward_from_through_nearest')
+        else:  # 第二半區
+            ordered += scan_non_through(half, front_key, hd, through_x, mode='towards_through_from_farthest')
+            if through_x is not None:
+                ordered += order_through_along_direction(half, hd[through_x], back_to_front=False)
+            ordered += scan_non_through(half, back_key,  hd, through_x, mode='outward_from_through_nearest')
+
+        return ordered
+
+    first_half  = make_half_order(start_half, phase="first")
+    second_half = make_half_order(other_half,  phase="second")
+    return first_half + second_half
+
+# ==== 測試/繪圖用：組裝完整路徑（永不走進貨架格；只在 AP 間移動） ====
+def build_full_path_debug(robot_start: Coord,
+                          shelf_locations: List[Coord],
+                          wm: np.ndarray,
+                          station_layout: Dict) -> List[Coord]:
+    """
+    組裝完整測試路徑：
+    - 走到 batch 的入口 AP
+    - 每個貨位改成走到「該貨位的 AP」（不進入貨架格）
+    - 非貫穿走道最後退回入口 AP
+    - 最後接到最近撿貨站的隊列入口（真實模擬請由引擎呼叫 set_path_to_dropoff）
+    """
+    if not shelf_locations:
+        return []
+    idx = build_index(shelf_locations, wm)
+    aisles = idx["aisles"]
+    ap_of  = idx["ap_of"]
+
+    def half_of(p: Coord) -> str: return "upper" if in_upper(p[0]) else "lower"
+
+    through = {
+        "upper": pick_through_aisle("upper", aisles["upper"]) if aisles["upper"] else None,
+        "lower": pick_through_aisle("lower", aisles["lower"]) if aisles["lower"] else None,
+    }
+
+    ordered = reorder_task_items(robot_start, shelf_locations, wm)
+
+    full_path: List[Coord] = []
+    cur = robot_start
+    i = 0
+    n = len(ordered)
+    while i < n:
+        cur_item = ordered[i]
+        cur_half = half_of(cur_item)
+        cur_ax = ap_of[cur_item][1]
+        is_through = (through[cur_half] is not None and cur_ax == through[cur_half])
+
+        # 收集同「走道 + 組」的連續貨位
+        gname = classify_group(cur_item[0])
+        batch = [cur_item]
+        j = i + 1
+        while j < n:
+            nxt = ordered[j]
+            if ap_of[nxt][1] == cur_ax and classify_group(nxt[0]) == gname:
+                batch.append(nxt); j += 1
+            else:
+                break
+
+        entry_ap = ap_of[batch[0]]
+
+        # 1) 走到入口 AP（可通行）
+        seg = base_plan_route(cur, entry_ap, wm, forbidden_cells=None)
+        if seg is None: return []
+        full_path += seg; cur = entry_ap
+
+        # 2) 逐貨位：只走到該貨位 AP（不走進貨架）
+        for shelf in batch:
+            ap = ap_of[shelf]
+            if cur != ap:
+                seg = base_plan_route(cur, ap, wm, forbidden_cells=None)
+                if seg is None: return []
+                full_path += seg; cur = ap
+            # 在此位置完成取貨（無需進一步移動）
+
+        # 3) 非貫穿：硬性退回入口 AP
+        if not is_through and cur != entry_ap:
+            seg = base_plan_route(cur, entry_ap, wm, forbidden_cells=None)
+            if seg is None: return []
+            full_path += seg; cur = entry_ap
+
+        i = j
+
+    # 4) 測試模式：連到最近撿貨站的隊列入口（真模擬由引擎自動 set_path_to_dropoff）
+    stations = station_layout.get("picking_stations", [])
+    if stations:
+        best = min(stations, key=lambda s: euclidean_distance(cur, tuple(s["pos"])))
+        queue_spots = [tuple(q) for q in best.get("queue", [])]
+        if queue_spots:
+            entry = queue_spots[-1]  # 入口取最遠
+            forbid = set(queue_spots[:-1])
+            start_pos_for_route = find_adjacent_aisle(cur, wm) or cur
+            # 若當前在非走道、先走回走道
+            if start_pos_for_route != cur:
+                seg0 = base_plan_route(cur, start_pos_for_route, wm, forbidden_cells=None)
+                if seg0: full_path += seg0; cur = start_pos_for_route
+            seg = base_plan_route(cur, entry, wm, forbidden_cells=forbid)
+            if seg: full_path += seg
+
+    return full_path
+
+# re-export（主程式仍可 import 本模組的 plan_route）
+def plan_route(start_pos: Coord, target_pos: Coord, warehouse_matrix: np.ndarray,
+               forbidden_cells: Optional[set] = None):
+    return base_plan_route(start_pos, target_pos, warehouse_matrix, forbidden_cells=forbidden_cells)
+
 

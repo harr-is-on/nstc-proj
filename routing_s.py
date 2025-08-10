@@ -1,290 +1,367 @@
-
+import numpy as np
 import heapq
 import math
-from typing import List, Tuple, Optional, Set, Dict
-import numpy as np
-from warehouse_layout import (
-    is_turn_point,
-    find_nearest_turn_point
-)
+from typing import List, Tuple, Dict, Optional, Set
 
-# --- 型別別名，方便閱讀 ---
+# 型別別名
 Coord = Tuple[int, int]
 
-def euclidean_distance(pos1: Coord, pos2: Coord) -> float:
-    return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
+class ImprovedSShapePathPlanner:
+    def __init__(self, warehouse_matrix: np.ndarray):
+        self.wm = warehouse_matrix
+        self.rows, self.cols = warehouse_matrix.shape
+        self.current_items: List[Coord] = []
+        self.visited: Set[Coord] = set()
+        self.touch_count = 0
+        self.zone = None
+        self.start_zone = None
+        self.zone_sequence = []
 
-def find_adjacent_aisle(pos: Coord, warehouse_matrix: np.ndarray) -> Optional[Coord]:
-   
-    rows, cols = warehouse_matrix.shape
-    r, c = pos
-    candidates = [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
-    for nr, nc in candidates:
-        if 0 <= nr < rows and 0 <= nc < cols and warehouse_matrix[nr, nc] == 0:
-            return (nr, nc)
-    return None
+    def determine_zone(self, pos: Coord) -> str:
+        return 'upper' if pos[0] <= 6 else 'lower'
+
+    def get_scan_direction(self, zone: str, is_first_zone: bool) -> str:
+        if self.start_zone == 'upper':
+            return 'left' if zone == 'upper' else 'right'
+        else:
+            return 'left' if zone == 'lower' else 'right'
+
+    def items_in_zone(self, zone: str = None) -> List[Coord]:
+        if zone is None:
+            zone = self.zone
+        if zone == 'upper':
+            return [i for i in self.current_items if i not in self.visited and i[0] <= 6]
+        else:
+            return [i for i in self.current_items if i not in self.visited and i[0] >= 7]
+
+    def scan_next(self, cur_x: int, items: List[Coord], dir: str) -> Optional[Coord]:
+        if not items:
+            return None
+        if dir == 'left':
+            cands = [i for i in items if i[1] <= cur_x]
+            return max(cands, key=lambda i: i[1]) if cands else None
+        else:
+            cands = [i for i in items if i[1] >= cur_x]
+            return min(cands, key=lambda i: i[1]) if cands else None
+
+    def gen_access(self, item: Coord) -> List[Coord]:
+        r, c = item
+        aps = []
+        for dc in (-1, 1):
+            nc = c + dc
+            if 0 <= nc < self.cols and self.wm[r, nc] == 0:
+                aps.append((r, nc))
+        if not aps:
+            for dr in (-1, 1):
+                nr = r + dr
+                if 0 <= nr < self.rows and self.wm[nr, c] == 0:
+                    aps.append((nr, c))
+        return aps
+
+    def gen_relays_for(self, item: Coord) -> Dict[str, List[Coord]]:
+        aps = self.gen_access(item)
+        groups = {'upper': [], 'lower': []}
+        for ay, ax in aps:
+            if 1 <= ay <= 6:
+                for ry in (1, 6):
+                    if self.wm[ry, ax] == 0:
+                        groups['upper'].append((ry, ax))
+            elif 7 <= ay <= 12:
+                for ry in (7, 12):
+                    if self.wm[ry, ax] == 0:
+                        groups['lower'].append((ry, ax))
+        groups['upper'] = list(set(groups['upper']))
+        groups['lower'] = list(set(groups['lower']))
+        return groups
+
+    def get_zone_entry_point(self, target_zone: str, from_pos: Coord) -> Optional[Coord]:
+        if target_zone == 'lower':
+            relay_rows = [7, 12]
+        else:
+            relay_rows = [1, 6]
+
+        candidates = []
+        for ry in relay_rows:
+            for x in range(self.cols):
+                if self.wm[ry, x] == 0:
+                    candidates.append((ry, x))
+
+        if not candidates:
+            return None
+
+        if self.start_zone == 'upper' and target_zone == 'lower':
+            return min(candidates, key=lambda p: (p[0], p[1]))
+        elif self.start_zone == 'lower' and target_zone == 'upper':
+            return min(candidates, key=lambda p: (-p[0], p[1]))
+
+        return min(candidates, key=lambda p: self.euclidean_distance(from_pos, p))
+
+    def euclidean_distance(self, p1: Coord, p2: Coord) -> float:
+        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+    def nearest(self, pos: Coord, pts: List[Coord]) -> Optional[Coord]:
+        return min(pts, key=lambda p: self.euclidean_distance(pos, p)) if pts else None
+
+    def paired(self, relay: Coord) -> Optional[Coord]:
+        ry, rx = relay
+        if ry in (1, 6):
+            py = 6 if ry == 1 else 1
+        elif ry in (7, 12):
+            py = 12 if ry == 7 else 7
+        else:
+            return None
+        return (py, rx) if self.wm[py, rx] == 0 else None
+
+    def check_all_items_visited(self) -> bool:
+        return len(self.visited) >= len(self.current_items)
+
+    def astar(self, start: Coord, goal: Coord,
+              dyn: Optional[List[Coord]] = None,
+              forbid: Optional[Set[Coord]] = None) -> Optional[List[Coord]]:
+        if forbid is None:
+            forbid = set()
+        rows, cols = self.rows, self.cols
+
+        def nbrs(p):
+            r, c = p
+            res = []
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if dyn and (nr, nc) in dyn and (nr, nc) != goal:
+                        continue
+                    if (nr, nc) in forbid and (nr, nc) != goal:
+                        continue
+                    if self.wm[nr, nc] in (0, 4, 5, 6, 7) or (nr, nc) == goal:
+                        res.append((nr, nc))
+            return res
+
+        def h(p): return abs(p[0] - goal[0]) + abs(p[1] - goal[1])
+
+        open_ = [(h(start), 0, start, [])]
+        closed = set()
+        while open_:
+            f, g, cur, path = heapq.heappop(open_)
+            if cur in closed:
+                continue
+            if cur == goal:
+                return (path + [cur])[1:]
+            closed.add(cur)
+            for n in nbrs(cur):
+                if n not in closed:
+                    heapq.heappush(open_, (g + 1 + h(n), g + 1, n, path + [cur]))
+        return None
+
+    def execute_items_only(self, start: Coord, items: List[Coord],
+                           dyn: Optional[List[Coord]] = None,
+                           forbid: Optional[Set[Coord]] = None) -> Optional[List[Coord]]:
+        print(f"=== 改進的 S-Shape 開始 (起始位置: {start}) ===")
+
+        self.current_items = items
+        self.visited.clear()
+        self.touch_count = 0
+        pos = start
+        path: List[Coord] = []
+
+        self.zone = self.determine_zone(pos)
+        self.start_zone = self.zone
+        self.zone_sequence = [self.zone]
+
+        print(f"📍 起始區域: {self.start_zone}")
+        print(f"📋 待揀貨物分布: 上半區 {len(self.items_in_zone('upper'))} 個, "
+              f"下半區 {len(self.items_in_zone('lower'))} 個")
+
+        while not self.check_all_items_visited():
+            zone_items = self.items_in_zone()
+            if not zone_items:
+                other_zone = 'upper' if self.zone == 'lower' else 'lower'
+                other_items = self.items_in_zone(other_zone)
+                if not other_items:
+                    print("✅ 所有貨物已揀取完成")
+                    break
+                print(f"🔄 切換區域: {self.zone} -> {other_zone}")
+                entry_point = self.get_zone_entry_point(other_zone, pos)
+                if entry_point:
+                    seg = self.astar(pos, entry_point, dyn, forbid)
+                    if seg is not None:
+                        path += seg
+                        pos = entry_point
+                        self.zone = other_zone
+                        self.zone_sequence.append(self.zone)
+                        self.touch_count = 0
+                        print(f"📍 已進入 {other_zone} 區域，入口點: {entry_point}")
+                    else:
+                        print(f"❌ 無法導航至 {other_zone} 區域入口點")
+                        break
+                else:
+                    print(f"❌ 找不到進入 {other_zone} 區域的入口點")
+                    break
+                continue
+
+            is_first_zone = (self.zone == self.start_zone)
+            direction = self.get_scan_direction(self.zone, is_first_zone)
+            nxt = self.scan_next(pos[1], zone_items, direction)
+            if not nxt:
+                odir = 'right' if direction == 'left' else 'left'
+                nxt = self.scan_next(pos[1], zone_items, odir)
+                if nxt:
+                    direction = odir
+                else:
+                    continue
+
+            same_row_items = [i for i in zone_items if i[0] == nxt[0]]
+            same_row_items.sort(key=lambda p: p[1], reverse=(direction == 'left'))
+
+            for item in same_row_items:
+                if item in self.visited:
+                    continue
+
+                print(f"🎯 處理目標: {item} (同巷道, 掃描方向: {direction})")
+
+                relays = self.gen_relays_for(item)[self.zone]
+                aps = self.gen_access(item)
+
+                if not relays or not aps:
+                    print(f"⚠️ 無法為 {item} 生成導航點，跳過")
+                    self.visited.add(item)
+                    continue
+
+                rlay = self.nearest(pos, relays)
+                ap = min(aps, key=lambda p: self.euclidean_distance(pos, p))
+
+                seg = self.astar(pos, rlay, dyn, forbid)
+                if seg is not None:
+                    path += seg
+                    pos = rlay
+                    self.touch_count += 1
+
+                    if self.touch_count % 2 == 1:
+                        pr = self.paired(rlay)
+                        if pr:
+                            seg2 = self.astar(pos, pr, dyn, forbid)
+                            if seg2:
+                                if ap in seg2:
+                                    idx = seg2.index(ap)
+                                    path += seg2[:idx + 1]
+                                    self.visited.add(item)
+                                    print(f"✅ 已揀取: {item} (路徑中)")
+                                    if self.check_all_items_visited():
+                                        print("🎉 所有貨物揀取完成！")
+                                        pos = ap
+                                        break
+                                    path += seg2[idx + 1:]
+                                    pos = pr
+                                else:
+                                    path += seg2
+                                    pos = pr
+                                    seg3 = self.astar(pos, ap, dyn, forbid)
+                                    if seg3:
+                                        path += seg3
+                                        pos = ap
+                                        self.visited.add(item)
+                                        print(f"✅ 已揀取: {item}")
+                                        if self.check_all_items_visited():
+                                            print("🎉 所有貨物揀取完成！")
+                                            break
+                                    else:
+                                        print(f"⚠️ 無法導航至 {item} 的 access point，跳過")
+                                        self.visited.add(item)
+                            else:
+                                print(f"⚠️ 無法導航至配對 relay point，跳過 {item}")
+                                self.visited.add(item)
+                        else:
+                            print(f"⚠️ 無配對 relay point，跳過 {item}")
+                            self.visited.add(item)
+                    else:
+                        seg2 = self.astar(pos, ap, dyn, forbid)
+                        if seg2:
+                            path += seg2
+                            pos = ap
+                            self.visited.add(item)
+                            print(f"✅ 已揀取: {item}")
+                            if self.check_all_items_visited():
+                                print("🎉 所有貨物揀取完成！")
+                                break
+                        else:
+                            print(f"⚠️ 無法直接導航至 {item} 的 access point，跳過")
+                            self.visited.add(item)
+                else:
+                    print(f"❌ 無法找到到達 {item} 的路徑，跳過")
+                    self.visited.add(item)
+                    continue
+
+        print(f"=== S-Shape 結束 ===")
+        print(f"📊 訪問 {len(self.visited)}/{len(self.current_items)} 個貨物")
+        print(f"📍 最終位置: {pos}")
+        print(f"📏 路徑總長度: {len(path)} 步")
+
+        return path
 
 
-def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
-    
-
-    # 調試信息：記錄路徑規劃的參數
-    print(f"🗺️ S-Shape 路徑規劃: {start_pos} -> {target_pos}")
-    
-    # 初始化參數
-    if forbidden_cells is None:
-        forbidden_cells = set()
-    if cost_map is None:
-        cost_map = {}
-    if dynamic_obstacles is None:
-        dynamic_obstacles = []
-
-    # 檢查是否使用 S-shape 策略
-    if 's_shape_picks' in cost_map and len(cost_map['s_shape_picks']) > 1:
-        pick_locations = cost_map['s_shape_picks']
-        print(f"🔄 啟用 S-shape 策略，撿貨點: {pick_locations}")
+    def execute_with_robot(self, robot, items: List[Coord],
+                          dyn: Optional[List[Coord]] = None,
+                          forbid: Optional[Set[Coord]] = None) -> Dict:
+        """
+        與機器人對象整合的 S-Shape 路徑規劃
+        在揀貨完成後會自動調用 robot.set_path_to_dropoff()
+        """
+        print(f"=== S-Shape (機器人整合版) 開始 ===")
+        print(f"🤖 機器人 ID: {robot.id if hasattr(robot, 'id') else 'N/A'}")
         
-        # 生成快取鍵值
-        cache_key = get_robot_key(start_pos, pick_locations)
+        # 執行改進的 S-Shape 路徑規劃
+        path_to_items = self.execute_items_only(robot.position, items, dyn, forbid)
         
-        # 檢查快取
-        if cache_key not in _s_shape_cache:
-            # 計算完整的 S-shape 路徑
-            full_path = plan_s_shape_complete_route(start_pos, pick_locations, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-            if full_path:
-                _s_shape_cache[cache_key] = {
-                    "full_path": full_path,
-                    "picks": pick_locations.copy()
-                }
-                print(f"💾 快取 S-shape 路徑，共 {len(full_path)} 步")
-            else:
-                print("❌ S-shape 路徑規劃失敗，回退到 A* 演算法")
-                return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
+        if not path_to_items:
+            print("❌ 無法規劃 S-Shape 路徑")
+            return None
         
-        # 從快取中取得路徑並返回適當段落
-        cached_data = _s_shape_cache[cache_key]
-        full_path = cached_data["full_path"]
+        # 找到最後的實際位置
+        last_actual_pos = path_to_items[-1] if path_to_items else robot.position
+        print(f"🎯 揀貨完成位置: {last_actual_pos}")
         
+        # 自動設定交貨路徑
         try:
-            # 找到起點在完整路徑中的位置
-            start_idx = full_path.index(start_pos)
+            from warehouse_layout import get_station_locations
+            from routing import find_adjacent_aisle, plan_route
             
-            # 找到終點在完整路徑中的位置
-            if target_pos in full_path[start_idx:]:
-                end_idx = full_path.index(target_pos, start_idx)
-                # 返回從下一步到終點的路徑段
-                result_path = full_path[start_idx + 1:end_idx + 1]
-                print(f"📍 返回 S-shape 路徑段: {len(result_path)} 步")
-                return result_path if result_path else None
-            else:
-                print("⚠️ 目標點不在 S-shape 路徑中，回退到 A* 演算法")
-                return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-        except ValueError:
-            print("⚠️ 起點不在 S-shape 路徑中，回退到 A* 演算法")
-            return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-    
-    # 不使用 S-shape 策略，使用標準 A* 演算法
-    return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
-
-
-def plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map):
-    """標準 A* 路徑規劃演算法 (原始實作)"""
-    rows, cols = warehouse_matrix.shape
-
-    def neighbors(pos: Coord) -> List[Coord]:
-        r, c = pos
-        candidates = [(r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)] # 四個方向
-        valid_neighbors = []
-        for nr, nc in candidates:
-            if 0 <= nr < rows and 0 <= nc < cols:
-                # 檢查動態障礙物 (除非它是我們的最終目標)
-                if dynamic_obstacles and (nr, nc) in dynamic_obstacles and (nr, nc) != target_pos:
-                    continue
-
-                # 檢查呼叫者提供的絕對禁止區域 (除非它是我們的最終目標)
-                if (nr, nc) in forbidden_cells and (nr, nc) != target_pos:
-                    continue
-
-                # 檢查靜態倉庫佈局。所有非障礙物的格子都是可通行的。
-                cell_type = warehouse_matrix[nr, nc]
-                if cell_type in [0, 4, 5, 6, 7] or (nr, nc) == target_pos:
-                    valid_neighbors.append((nr, nc))
-        return valid_neighbors
-
-    def heuristic(pos):
-        # 啟發函式 (Heuristic): 使用曼哈頓距離，這在網格地圖上通常很有效。
-        return abs(pos[0] - target_pos[0]) + abs(pos[1] - target_pos[1])
-
-    # --- A* 演算法主體 ---
-    open_list = [(heuristic(start_pos), 0, start_pos, [])]  # (f_score, g_score, pos, path)
-    closed_set = set()
-
-    while open_list:
-        f, g, current, path = heapq.heappop(open_list)
-
-        if current in closed_set:
-            continue
-
-        # 如果到達目標，重建並返回路徑
-        if current == target_pos:
-            # 根據「合約」，我們需要返回從「下一步」開始的路徑。
-            return (path + [current])[1:]
-
-        closed_set.add(current)
-
-        # 探索所有有效的鄰居節點
-        for neighbor in neighbors(current):
-            if neighbor in closed_set:
-                continue
+            stations = get_station_locations()['picking_stations']
+            best_station = min(stations, 
+                             key=lambda s: self.euclidean_distance(last_actual_pos, s['pos']))
+            best_queue_spot = best_station['queue'][-1]
             
-            # 計算移動到鄰居的成本 (g_score)
-            move_cost = cost_map.get(neighbor, 1) if isinstance(cost_map.get(neighbor), int) else 1
-            new_g = g + move_cost
-            # 計算 f_score = g_score + h_score
-            new_f = new_g + heuristic(neighbor)
-            # 將鄰居節點加入優先佇列
-            heapq.heappush(open_list, (new_f, new_g, neighbor, path + [current]))
-
-    return None  # 如果 open_list 為空仍未找到路徑，則表示無解
-
-
-# --- S-shape 策略全域狀態管理 ---
-# 儲存每個機器人的 S-shape 路徑狀態
-# 格式: robot_position_key -> {"full_path": [...], "picks_remaining": [...], "current_target": Coord}
-_s_shape_cache = {}
-
-def get_robot_key(start_pos: Coord, picks: List[Coord]) -> str:
-    """生成機器人狀態的唯一鍵值"""
-    picks_str = "_".join([f"{p[0]}-{p[1]}" for p in sorted(picks)])
-    return f"{start_pos[0]}-{start_pos[1]}_{picks_str}"
-
-def clear_s_shape_cache():
-    """清除所有 S-shape 快取"""
-    global _s_shape_cache
-    _s_shape_cache = {}
-
-def plan_s_shape_complete_route(start_pos: Coord, pick_locations: List[Coord], warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord], cost_map: Dict) -> List[Coord]:
-    
-    if not pick_locations:
-        return [start_pos]
-
-    path = [start_pos]
-    curr = start_pos
-
-    # 1. 找出所有需要撿貨的巷道並排序
-    remaining_picks = pick_locations.copy()
-    aisles_to_visit = sorted(list(set(p[1] for p in remaining_picks)))
-
-    print(f"🔄 開始純正 S-shape 路徑計算，起點: {start_pos}，目標巷道: {aisles_to_visit}")
-
-    # 2. 交替清掃方向，1=向下, -1=向上
-    sweep_direction = 1
-
-    for aisle_col in aisles_to_visit:
-        print(f"\n  清掃巷道: {aisle_col}, 方向: {'下' if sweep_direction == 1 else '上'}")
-
-        # 3. 決定入口和出口轉彎點
-        if sweep_direction == 1: # 向下掃
-            entry_turn = find_nearest_turn_point((0, aisle_col), 'any')
-            exit_turn = find_nearest_turn_point((warehouse_matrix.shape[0]-1, aisle_col), 'any')
-        else: # 向上掃
-            entry_turn = find_nearest_turn_point((warehouse_matrix.shape[0]-1, aisle_col), 'any')
-            exit_turn = find_nearest_turn_point((0, aisle_col), 'any')
-
-        # 從當前位置移動到入口轉彎點
-        if curr != entry_turn:
-            print(f"  → 前往入口: {entry_turn}")
-            segment = a_star_internal_path(curr, entry_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-            if segment and len(segment) > 1:
-                path.extend(segment[1:])
-            curr = entry_turn
-        
-        # 4. 找出該巷道內的所有撿貨點，並根據清掃方向排序
-        aisle_picks = sorted(
-            [p for p in remaining_picks if p[1] == aisle_col],
-            key=lambda p: p[0],
-            reverse=(sweep_direction == -1)
-        )
-        
-        # 逐一撿貨
-        for pick_pos in aisle_picks:
-            segment = a_star_internal_path(curr, pick_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-            if segment:
-                if len(segment) > 1:
-                    path.extend(segment[1:])
-                curr = pick_pos
-                # 從剩餘清單中移除已撿的貨物
-                if pick_pos in remaining_picks:
-                    remaining_picks.remove(pick_pos)
-                print(f"    ✅ 撿貨完成: {pick_pos}")
-            else:
-                print(f"    ❌ 無法到達撿貨點: {pick_pos}")
-                # 同樣移除無法到達的點，避免重複嘗試
-                if pick_pos in remaining_picks:
-                    remaining_picks.remove(pick_pos)
-        
-        # 5. 撿完後，移動到出口轉彎點
-        if curr != exit_turn:
-            print(f"  → 前往出口: {exit_turn}")
-            segment = a_star_internal_path(curr, exit_turn, warehouse_matrix, dynamic_obstacles, forbidden_cells)
-            if segment and len(segment) > 1:
-                path.extend(segment[1:])
-            curr = exit_turn
-
-        # 6. 反轉清掃方向，為下一個巷道做準備
-        sweep_direction *= -1
-    
-    print(f"🎉 S-shape 路徑計算完成，總長度: {len(path)}")
-    return path
-
-def a_star_internal_path(start: Coord, goal: Coord, warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord]) -> List[Coord]:
-    """A* 路徑搜尋，專用於 S-shape 內部路徑規劃"""
-    if start == goal:
-        return [start]
-    
-    rows, cols = warehouse_matrix.shape
-    
-    def neighbors(pos: Coord) -> List[Coord]:
-        r, c = pos
-        candidates = [(r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)]
-        valid = []
-        for nr, nc in candidates:
-            if 0 <= nr < rows and 0 <= nc < cols:
-                # 檢查動態障礙物
-                if (nr, nc) in dynamic_obstacles and (nr, nc) != goal:
-                    continue
-                # 檢查禁止區域
-                if (nr, nc) in forbidden_cells and (nr, nc) != goal:
-                    continue
-                # 檢查倉庫佈局
-                cell_type = warehouse_matrix[nr, nc]
-                if cell_type in [0, 4, 5, 6, 7] or (nr, nc) == goal:
-                    valid.append((nr, nc))
-        return valid
-    
-    def heuristic(pos):
-        return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
-    
-    open_list = [(heuristic(start), 0, start, [start])]
-    closed_set = set()
-    
-    while open_list:
-        f, g, current, path = heapq.heappop(open_list)
-        
-        if current in closed_set:
-            continue
+            print(f"📍 選定交貨站: {best_station['pos']}, 排隊入口: {best_queue_spot}")
             
-        if current == goal:
-            return path
+            # 從貨架移到鄰近的走道
+            start_pos_for_dropoff = find_adjacent_aisle(last_actual_pos, self.wm)
+            if not start_pos_for_dropoff:
+                print(f"⚠️ 無法在 {last_actual_pos} 附近找到走道")
+                start_pos_for_dropoff = last_actual_pos
             
-        closed_set.add(current)
+            # 規劃到交貨站的路徑
+            dropoff_path = plan_route(
+                start_pos_for_dropoff,
+                best_queue_spot,
+                self.wm,
+                dynamic_obstacles=dyn,
+                forbidden_cells=forbid
+            )
+            
+            if dropoff_path and hasattr(robot, 'set_path_to_dropoff'):
+                print(f"🚚 設定交貨路徑")
+                robot.set_path_to_dropoff(dropoff_path, best_station['pos'])
+                print(f"✅ 交貨路徑設定完成")
+            
+        except Exception as e:
+            print(f"⚠️ 設定交貨路徑時發生錯誤: {e}")
         
-        for neighbor in neighbors(current):
-            if neighbor in closed_set:
-                continue
-            new_g = g + 1
-            new_f = new_g + heuristic(neighbor)
-            heapq.heappush(open_list, (new_f, new_g, neighbor, path + [neighbor]))
-    
-    return []  # 無路徑
-
+        # 返回詳細資訊
+        return {
+            'picking_path': path_to_items,
+            'picking_start': robot.position,
+            'picking_end': last_actual_pos,
+            'picking_steps': len(path_to_items) if path_to_items else 0,
+            'visited_items': len(self.visited),
+            'total_items': len(items),
+            'zone_sequence': self.zone_sequence,
+            'start_zone': self.start_zone
+        }
