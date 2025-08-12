@@ -1,3 +1,34 @@
+"""
+路徑規劃策略模組 - S-Shape 策略實作
+
+這個檔案實作了 S-Shape 路徑規劃策略，適配自 old_rs/s_shape_d.py。
+主要函式 `plan_route` 遵循原始範本的輸入輸出格式要求。
+
+S-Shape 策略運作原理：
+===================
+
+1. **道路類型定義**：
+   - Main Roads: 水平走道 (horizontal aisles: [0, 1, 6, 7, 12, 13])
+   - Sub Roads: 垂直走道 (vertical aisles: [0, 1, 4, 7, 10, 13, 14])
+   - Turn Points: main road 與 sub road 的交叉點
+
+2. **S-Shape 路徑規劃流程**：
+   Step 1: 如果不在 turn point，先垂直移動到最近的 turn point
+   Step 2: 水平移動到目標 sub road 所在的列
+   Step 3: 沿當前方向撿完該 sub road 中的所有貨物
+   Step 4: 繼續往該方向走到底部 turn point
+   Step 5: 重複 Step 1-4 直到撿完所有貨物
+
+3. **適配策略**：
+   - 保持原始 plan_route 函式簽名不變
+   - 透過 cost_map 參數傳遞額外的 S-shape 相關資訊
+   - 使用全域狀態管理避免重複計算完整路徑
+   - 支援單點任務回退到 A* 演算法
+
+4. **輸入輸出格式**：
+   - 輸入: start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map
+   - 輸出: 從「下一步」到終點的路徑列表，例如：[(0,1), (0,2), (1,2)]
+"""
 
 import heapq
 import math
@@ -12,10 +43,18 @@ from warehouse_layout import (
 Coord = Tuple[int, int]
 
 def euclidean_distance(pos1: Coord, pos2: Coord) -> float:
+    """【輔助函式】計算兩點之間的歐幾里得距離。"""
     return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
 
 def find_adjacent_aisle(pos: Coord, warehouse_matrix: np.ndarray) -> Optional[Coord]:
-   
+    """
+    尋找給定位置旁邊的第一個可用走道格。
+    這對於將機器人從貨架或工作站移到路徑上至關重要。
+
+    :param pos: 當前位置 (例如貨架)。
+    :param warehouse_matrix: 倉庫佈局。
+    :return: 旁邊的走道座標，如果找不到則返回 None。
+    """
     rows, cols = warehouse_matrix.shape
     r, c = pos
     candidates = [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
@@ -26,10 +65,37 @@ def find_adjacent_aisle(pos: Coord, warehouse_matrix: np.ndarray) -> Optional[Co
 
 
 def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optional[List[Coord]] = None, forbidden_cells: Optional[Set[Coord]] = None, cost_map: Optional[Dict[Coord, int]] = None):
+    """【核心策略函式】- S-Shape 策略實作
+    為機器人規劃一條從起點到終點的路徑。
     
+    **你的演算法會收到什麼資訊 (參數)：**
+    - `start_pos`, `target_pos`: 規劃路徑的起點與終點。
+    - `warehouse_matrix`: 靜態的倉庫地圖。您可以根據其中的代號判斷哪些格子是可通行的 (例如，代號為 0, 4, 5, 6, 7 的是走道或特殊區域)。
+    - `dynamic_obstacles`: 其他機器人目前的位置。您的演算法應避免路徑經過這些點。
+    - `forbidden_cells`: 此次規劃中「絕對不能」經過的格子。這由主引擎根據機器人當前任務決定。
+    - `cost_map`: 一個「建議」繞行的區域地圖。移動到這些格子的成本較高，您的演算法可以利用此資訊找出更有效率或更安全的路線，但並非強制禁止。
+                  **特殊用法**: 當 cost_map 包含 's_shape_picks' 鍵時，啟用 S-shape 策略。
 
+    **你的演算法需要提供什麼結果 (回傳值)：**
+    - 一個座標列表 `List[Coord]`：代表從「下一步」到終點的路徑。
+      例如：若從 (0,0) 到 (0,2)，應返回 `[(0,1), (0,2)]`。
+    - `None`：如果找不到任何可行的路徑。
+
+    **你的演算法「不需要」處理的：**
+    - 機器人的狀態、電量、任務細節等。
+    - 碰撞管理或路權協調 (這由 `congestion_model.py` 處理)。
+    - 實際移動機器人 (主引擎會根據你回傳的路徑來執行)。
+    
+    **S-Shape 策略說明：**
+    當 cost_map 包含 's_shape_picks' 時，演算法會：
+    1. 檢查是否有多個撿貨點需要 S-shape 路徑規劃
+    2. 如果有，計算完整的 S-shape 路徑並快取
+    3. 根據當前 start_pos 和 target_pos 返回路徑的適當段落
+    4. 如果不適用 S-shape，回退到標準 A* 演算法
+    ---
+    """
     # 調試信息：記錄路徑規劃的參數
-    print(f"🗺️ S-Shape 路徑規劃: {start_pos} -> {target_pos}")
+    print(f"S-Shape 路徑規劃: {start_pos} -> {target_pos}")
     
     # 初始化參數
     if forbidden_cells is None:
@@ -42,7 +108,7 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
     # 檢查是否使用 S-shape 策略
     if 's_shape_picks' in cost_map and len(cost_map['s_shape_picks']) > 1:
         pick_locations = cost_map['s_shape_picks']
-        print(f"🔄 啟用 S-shape 策略，撿貨點: {pick_locations}")
+        print(f" 啟用 S-shape 策略，撿貨點: {pick_locations}")
         
         # 生成快取鍵值
         cache_key = get_robot_key(start_pos, pick_locations)
@@ -56,9 +122,9 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
                     "full_path": full_path,
                     "picks": pick_locations.copy()
                 }
-                print(f"💾 快取 S-shape 路徑，共 {len(full_path)} 步")
+                print(f" 快取 S-shape 路徑，共 {len(full_path)} 步")
             else:
-                print("❌ S-shape 路徑規劃失敗，回退到 A* 演算法")
+                print(" S-shape 路徑規劃失敗，回退到 A* 演算法")
                 return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
         
         # 從快取中取得路徑並返回適當段落
@@ -74,13 +140,13 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
                 end_idx = full_path.index(target_pos, start_idx)
                 # 返回從下一步到終點的路徑段
                 result_path = full_path[start_idx + 1:end_idx + 1]
-                print(f"📍 返回 S-shape 路徑段: {len(result_path)} 步")
+                print(f"返回 S-shape 路徑段: {len(result_path)} 步")
                 return result_path if result_path else None
             else:
-                print("⚠️ 目標點不在 S-shape 路徑中，回退到 A* 演算法")
+                print("目標點不在 S-shape 路徑中，回退到 A* 演算法")
                 return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
         except ValueError:
-            print("⚠️ 起點不在 S-shape 路徑中，回退到 A* 演算法")
+            print("起點不在 S-shape 路徑中，回退到 A* 演算法")
             return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
     
     # 不使用 S-shape 策略，使用標準 A* 演算法
@@ -164,7 +230,20 @@ def clear_s_shape_cache():
     _s_shape_cache = {}
 
 def plan_s_shape_complete_route(start_pos: Coord, pick_locations: List[Coord], warehouse_matrix: np.ndarray, dynamic_obstacles: List[Coord], forbidden_cells: Set[Coord], cost_map: Dict) -> List[Coord]:
-    
+    """
+    實作完整 S-shape 路徑規劃
+
+    此版本為純正的 S-Shape 策略，會依序由左至右清掃所有需要作業的巷道。
+
+    S-Shape 策略步驟：
+    1. 找出所有需要撿貨的巷道 (sub roads)。
+    2. 依巷道順序 (由左至右) 進行排序。
+    3. 交替上下方向，清掃每個巷道內的所有貨物。
+    4. 從巷道一端進入，另一端離開，形成 S 形路徑。
+    5. 重複直到所有巷道清掃完畢。
+
+    返回包含起點的完整路徑
+    """
     if not pick_locations:
         return [start_pos]
 
@@ -175,7 +254,7 @@ def plan_s_shape_complete_route(start_pos: Coord, pick_locations: List[Coord], w
     remaining_picks = pick_locations.copy()
     aisles_to_visit = sorted(list(set(p[1] for p in remaining_picks)))
 
-    print(f"🔄 開始純正 S-shape 路徑計算，起點: {start_pos}，目標巷道: {aisles_to_visit}")
+    print(f" 開始純正 S-shape 路徑計算，起點: {start_pos}，目標巷道: {aisles_to_visit}")
 
     # 2. 交替清掃方向，1=向下, -1=向上
     sweep_direction = 1
@@ -216,9 +295,9 @@ def plan_s_shape_complete_route(start_pos: Coord, pick_locations: List[Coord], w
                 # 從剩餘清單中移除已撿的貨物
                 if pick_pos in remaining_picks:
                     remaining_picks.remove(pick_pos)
-                print(f"    ✅ 撿貨完成: {pick_pos}")
+                print(f"     撿貨完成: {pick_pos}")
             else:
-                print(f"    ❌ 無法到達撿貨點: {pick_pos}")
+                print(f"    無法到達撿貨點: {pick_pos}")
                 # 同樣移除無法到達的點，避免重複嘗試
                 if pick_pos in remaining_picks:
                     remaining_picks.remove(pick_pos)
@@ -288,3 +367,39 @@ def a_star_internal_path(start: Coord, goal: Coord, warehouse_matrix: np.ndarray
     
     return []  # 無路徑
 
+# --- 使用範例和測試函式 ---
+
+def example_usage():
+    """
+    使用範例：如何呼叫 S-shape 路徑規劃
+    
+    要啟用 S-shape 策略，需要在 cost_map 中包含 's_shape_picks' 鍵：
+    
+    ```python
+    from warehouse_layout import create_warehouse_layout
+    
+    # 建立倉庫佈局
+    warehouse_matrix, _ = create_warehouse_layout()
+    
+    # 單點路徑規劃（使用 A*）
+    path = plan_route((1, 1), (5, 8), warehouse_matrix)
+    
+    # 多點 S-shape 路徑規劃
+    cost_map_with_s_shape = {
+        's_shape_picks': [(2, 4), (5, 4), (8, 7), (3, 10)]  # 多個撿貨點
+    }
+    
+    # 從起點到第一個撿貨點
+    path_segment = plan_route(
+        start_pos=(1, 1), 
+        target_pos=(2, 4), 
+        warehouse_matrix=warehouse_matrix,
+        cost_map=cost_map_with_s_shape
+    )
+    ```
+    
+    輸出範例：
+    - 單點：[(1, 2), (1, 3), (2, 3), (3, 3), (4, 3), (5, 3), (5, 4), (5, 5), (5, 6), (5, 7), (5, 8)]
+    - S-shape 路徑段：根據 S-shape 完整路徑返回適當段落
+    """
+    pass

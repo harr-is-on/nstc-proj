@@ -59,9 +59,9 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
     """
     # 調試信息：記錄路徑規劃的參數
     if forbidden_cells:
-        print(f"🗺️ 路徑規劃: {start_pos} -> {target_pos}, 禁止區域: {forbidden_cells}")
+        print(f" 路徑規劃: {start_pos} -> {target_pos}, 禁止區域: {forbidden_cells}")
     else:
-        print(f"🗺️ 路徑規劃: {start_pos} -> {target_pos}")
+        print(f" 路徑規劃: {start_pos} -> {target_pos}")
     rows, cols = warehouse_matrix.shape
 
     # --- A* 演算法的初始化 ---

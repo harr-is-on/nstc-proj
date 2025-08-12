@@ -51,17 +51,18 @@ class TaskManager:
         
         # 格式化輸出，使其更易讀
         locations_str = ', '.join(map(str, shelf_locations))
-        print(f"✨ 已生成新任務 {task['task_id']} (共 {num_locations} 個點)，目標貨架: {locations_str}")
+        print(f" 已生成新任務 {task['task_id']} (共 {num_locations} 個點)，目標貨架: {locations_str}")
         return task
 
-    def assign_pending_tasks(self, robots: Dict[str, 'Robot'], warehouse_matrix: np.ndarray, plan_route_func, forbidden_cells_for_tasks: Optional[Set[Coord]] = None):
+    def assign_pending_tasks(self, robots: Dict[str, 'Robot'], warehouse_matrix: np.ndarray, plan_route_func, routing_strategy_name: str, forbidden_cells_for_tasks: Optional[Set[Coord]] = None):
         """
         將佇列中的任務分配給任何可用的閒置機器人。
-        採用先到先得的分配策略，而非尋找最近的機器人。
+        此函式現在會根據當前的路徑規劃策略，為多點任務準備特殊的 `cost_map`。
 
         :param robots: 當前所有機器人物件的字典。
         :param warehouse_matrix: 倉庫佈局，用於路徑規劃。
         :param plan_route_func: 用於規劃路徑的函數。
+        :param routing_strategy_name: 當前使用的路徑規劃策略名稱 (例如 'routing_m')。
         :param forbidden_cells_for_tasks: 在為任務規劃路徑時應避開的格子集合 (例如，排隊區)。
         """
         if not self.task_queue:
@@ -89,14 +90,28 @@ class TaskManager:
                 # 規劃到任務列表中的第一個貨架
                 target_pos = task["shelf_locations"][0]
                 
-                path = plan_route_func(robot_to_assign.position, target_pos, warehouse_matrix, forbidden_cells=forbidden_cells_for_tasks)
+                # --- 策略性 cost_map 準備 ---
+                # 為了讓多點路徑規劃策略 (如 routing_m) 能正常運作，
+                # 我們需要根據策略名稱，將完整的撿貨點列表放入 cost_map。
+                cost_map = {}
+                if len(task["shelf_locations"]) > 1:
+                    strategy_key_map = {
+                        'routing_m': 'composite_picks',
+                        'routing_l': 'largest_gap_picks',
+                        'routing_s': 's_shape_picks'
+                    }
+                    if routing_strategy_name in strategy_key_map:
+                        key = strategy_key_map[routing_strategy_name]
+                        cost_map[key] = task['shelf_locations']
+                
+                path = plan_route_func(robot_to_assign.position, target_pos, warehouse_matrix, forbidden_cells=forbidden_cells_for_tasks, cost_map=cost_map)
                 
                 if path:
                     # 如果路徑規劃成功，則分配任務
                     robot_to_assign.assign_task(task, path)
                 else:
                     # 如果路徑規劃失敗，將機器人和任務都放回待處理列表
-                    print(f"⚠️ 無法為機器人 {robot_to_assign.id} 規劃到任務 {task['task_id']} 的路徑。")
+                    print(f"無法為機器人 {robot_to_assign.id} 規劃到任務 {task['task_id']} 的路徑。")
                     available_robots.append(robot_to_assign) # 將機器人放回可用列表的末尾
                     unassigned_tasks.append(task)
             else:

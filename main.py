@@ -6,6 +6,7 @@
 
 import json
 import importlib
+import statistics
 from typing import Tuple, List, Dict, Optional
 
 # 從專案中匯入模組
@@ -513,3 +514,14 @@ if __name__ == "__main__":
             print(f"  Total_idle_time: {all_total_idle_time[i]:.2f}")
             print(f"  Total_distance_traveled: {all_total_distance_traveled[i]:.2f}")
             print(f"  Total_energy_usage: {all_total_energy_usage[i]:.2f}")
+
+        # 計算並印出平均值
+        print("\n--- 平均結果 ---")
+        if all_makespan:
+            print(f"  Makespan 平均: {statistics.mean(all_makespan):.2f}")
+        if all_total_idle_time:
+            print(f"  Total Idle Time 平均: {statistics.mean(all_total_idle_time):.2f}")
+        if all_total_distance_traveled:
+            print(f"  Total Distance Traveled 平均: {statistics.mean(all_total_distance_traveled):.2f}")
+        if all_total_energy_usage:
+            print(f"  Total Energy Usage 平均: {statistics.mean(all_total_energy_usage):.2f}")

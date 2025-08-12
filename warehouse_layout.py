@@ -36,6 +36,11 @@ CELL_CODES = {
     "picking_queue": 6, "picking_exit": 7
 }
 
+# --- 倉儲佈局常數 (可供外部函式使用) ---
+VERTICAL_AISLES = [0, 1, 4, 7, 10, 13, 14]
+HORIZONTAL_AISLES = [0, 1, 6, 7, 12, 13]
+
+# --- 視覺化顏色定義 (Single Source of Truth for Colors) ---
 
 def create_warehouse_layout() -> Tuple[np.ndarray, ShelfDict]:
     """
@@ -55,16 +60,14 @@ def create_warehouse_layout() -> Tuple[np.ndarray, ShelfDict]:
     # --- 固定的倉儲配置 ---
     num_rows = 14
     num_cols = 15
-    vertical_aisles = [0, 1, 4, 7, 10, 13, 14]
-    horizontal_aisles = [0, 1, 6, 7, 12, 13]
     shelf_levels = 4
 
     # --- 配置結束 ---
 
     # 使用 numpy 的廣播功能更有效率地創建矩陣
     warehouse_matrix = np.ones((num_rows, num_cols), dtype=int)
-    warehouse_matrix[horizontal_aisles, :] = 0
-    warehouse_matrix[:, vertical_aisles] = 0
+    warehouse_matrix[HORIZONTAL_AISLES, :] = 0
+    warehouse_matrix[:, VERTICAL_AISLES] = 0
 
     # 使用字典推導式更有效率地創建貨架字典
     shelf_coords = np.argwhere(warehouse_matrix == 1)
@@ -130,6 +133,43 @@ def plot_warehouse(warehouse_matrix: np.ndarray):
     plt.legend(handles=patches, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
     plt.title("Warehouse Layout", fontsize=16)
     plt.show()
+
+
+# --- 新增：供 routing_m.py 使用的輔助函式 ---
+
+def is_turn_point(pos: Coord) -> bool:
+    """
+    檢查一個座標是否為主幹道與次幹道的交叉點 (轉彎點)。
+    """
+    r, c = pos
+    # 轉彎點是水平和垂直走道的交集
+    return r in HORIZONTAL_AISLES and c in VERTICAL_AISLES
+
+def find_nearest_turn_point(pos: Coord, direction: str = 'any') -> Coord:
+    """
+    找到離給定座標最近的轉彎點。
+    :param pos: 當前座標。
+    :param direction: 'any', 'up', or 'down'. 'up' 指的是較小的行索引，'down' 指的是較大的。
+    :return: 最近的轉彎點座標。
+    """
+    r, c = pos
+    
+    # 產生所有可能的轉彎點
+    all_turn_points = [(hr, vc) for hr in HORIZONTAL_AISLES for vc in VERTICAL_AISLES]
+    
+    if not all_turn_points:
+        return pos # 如果沒有定義轉彎點，返回原位
+
+    # 根據方向篩選
+    if direction == 'up':
+        candidate_points = [tp for tp in all_turn_points if tp[0] < r]
+    elif direction == 'down':
+        candidate_points = [tp for tp in all_turn_points if tp[0] > r]
+    else: # 'any'
+        candidate_points = all_turn_points
+
+    # 找到曼哈頓距離最小的點
+    return min(candidate_points or all_turn_points, key=lambda p: abs(p[0] - r) + abs(p[1] - c))
 
 if __name__ == '__main__':
     # 這個區塊只在直接執行此腳本時運行。

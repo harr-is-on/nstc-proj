@@ -7,7 +7,7 @@ from typing import Tuple, Optional, Dict, List, Union
 
 # --- 機器人相關設定 ---
 ROBOT_CONFIG = {
-    "num_robots": 5,
+    "num_robots": 8,
     "move_speed": 1,              # 機器人每個時間步移動的格數
     "pickup_duration": 2,         # 機器人撿貨所需的時間步
     "dropoff_duration": 1,        # 機器人交貨所需的時間步
@@ -20,8 +20,8 @@ ROBOT_CONFIG = {
 # --- 模擬與任務相關設定 ---
 SIMULATION_CONFIG = {
     "num_initial_tasks": 5,      # 模擬開始時生成的初始任務數量
-    "target_tasks_completed": 300, # 【新】模擬運行的目標任務完成數
-    "max_simulation_steps_safety_limit": 50000, # 【新】為防止無限迴圈，設定一個極大的安全步數上限
+    "target_tasks_completed": 300, # 模擬運行的目標任務完成數
+    "max_simulation_steps_safety_limit": 50000, # 為防止無限迴圈，設定一個極大的安全步數上限
     "task_generation_interval": 1, # 每 n 個時間步生成一個新任務 (調快以確保有足夠任務)
     "task_locations_range": (1, 3), # 每個任務包含的貨架地點數量的隨機範圍 (最小值, 最大值)
 }
@@ -157,29 +157,26 @@ class Robot:
         self.status = RobotStatus.CHARGING
         self.target_station_pos = None # 到達充電站，清除目標
         self.charging_status = True
-        print(f"🔋 機器人 {self.id} 開始充電。")
+        print(f" 機器人 {self.id} 開始充電。")
 
     def stop_charging(self):
         """停止充電，將機器人狀態重設為閒置。"""
-        self.battery_level = self.full_charge_level
+        # 充電後的最終電量由充電站邏輯決定，此處僅更新狀態
         self.charging_status = False
         self.status = RobotStatus.IDLE
-        print(f"✅ 機器人 {self.id} 充電完畢，恢復閒置狀態。")
+        print(f" 機器人 {self.id} 充電完畢 (電量: {self.battery_level:.2f})，恢復閒置狀態。")
 
-    def charge(self, amount: float) -> bool:
+    def charge(self, amount: float):
         """
         為機器人充電。
+        充電是否完成的判斷邏輯已移至充電站模型中。
+
         :param amount: 要增加的電量。
-        :return: 如果電量已滿，返回 True，否則返回 False。
         """
-        if self.battery_level >= self.full_charge_level:
-            return True # 已經充滿
-        
         self.battery_level += amount
-        if self.battery_level >= self.full_charge_level:
-            self.battery_level = self.full_charge_level
-            return True  # 充電完成
-        return False  # 仍在充電
+        # 將電量限制在 100 以內，以防萬一
+        if self.battery_level > 100:
+            self.battery_level = 100.0
 
     def start_picking(self):
         """開始撿貨，更新機器人狀態並設定計時器。"""
@@ -187,7 +184,7 @@ class Robot:
         if self.status == RobotStatus.MOVING_TO_SHELF and not self.path:
             self.status = RobotStatus.PICKING
             self.pickup_timer = self.pickup_duration
-            print(f"📦 機器人 {self.id} 在位置 {self.position} 開始撿貨 (耗時: {self.pickup_duration} 步)。")
+            print(f" 機器人 {self.id} 在位置 {self.position} 開始撿貨 (耗時: {self.pickup_duration} 步)。")
         else:
             print(f"警告: 機器人 {self.id} 在非預期狀態 '{self.status.value}' 或未到達貨架時嘗試撿貨。")
 
@@ -207,7 +204,7 @@ class Robot:
         if self.pickup_timer == 0:
             self.carrying_item = True
             self.battery_level -= self.energy_per_pickup
-            print(f"⚡️ 機器人 {self.id} 撿貨消耗 {self.energy_per_pickup} 電量，剩餘 {self.battery_level:.2f}。")
+            print(f" 機器人 {self.id} 撿貨消耗 {self.energy_per_pickup} 電量，剩餘 {self.battery_level:.2f}。")
             return True
         
         # 計時器還沒跑完
@@ -221,14 +218,14 @@ class Robot:
         self.path = path
         self.target_station_pos = station_pos # 記住目標交貨站
         self.status = RobotStatus.MOVING_TO_DROPOFF
-        print(f"🚚 機器人 {self.id} 撿貨完畢，前往交貨站。")
+        print(f" 機器人 {self.id} 撿貨完畢，前往交貨站。")
 
     def start_dropping_off(self):
         """開始交貨，更新機器人狀態並設定計時器。"""
         if self.status == RobotStatus.MOVING_TO_DROPOFF and not self.path:
             self.status = RobotStatus.DROPPING_OFF
             self.dropoff_timer = self.dropoff_duration
-            print(f"📥 機器人 {self.id} 在位置 {self.position} 開始交貨 (耗時: {self.dropoff_duration} 步)。")
+            print(f" 機器人 {self.id} 在位置 {self.position} 開始交貨 (耗時: {self.dropoff_duration} 步)。")
         else:
             print(f"警告: 機器人 {self.id} 在非預期狀態 '{self.status.value}' 或未到達交貨站時嘗試交貨。")
 

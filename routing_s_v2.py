@@ -145,21 +145,21 @@ class ImprovedSShapePathPlanner:
         self.start_zone = self.zone
         self.zone_sequence = [self.zone]
 
-        print(f"📍 起始區域: {self.start_zone}")
-        print(f"📋 待揀貨物分布: 上半區 {len(self.items_in_zone('upper'))} 個, 下半區 {len(self.items_in_zone('lower'))} 個")
+        print(f" 起始區域: {self.start_zone}")
+        print(f" 待揀貨物分布: 上半區 {len(self.items_in_zone('upper'))} 個, 下半區 {len(self.items_in_zone('lower'))} 個")
 
         while not self.check_all_items_visited():
             zone_items = self.items_in_zone()
             if not zone_items:
                 other_zone = 'upper' if self.zone == 'lower' else 'lower'
                 if not self.items_in_zone(other_zone):
-                    print("✅ 所有貨物已在規劃中，結束路徑生成。")
+                    print(" 所有貨物已在規劃中，結束路徑生成。")
                     break
                 
                 print(f"🔄 切換區域: {self.zone} -> {other_zone}")
                 entry_point = self.get_zone_entry_point(other_zone, pos)
                 if not entry_point:
-                    print(f"❌ 找不到進入 {other_zone} 區域的入口點，路徑規劃終止。")
+                    print(f" 找不到進入 {other_zone} 區域的入口點，路徑規劃終止。")
                     return None # 嚴重錯誤，無法繼續
                 
                 seg = plan_route_a_star(pos, entry_point, self.wm, dyn, forbid)
@@ -169,9 +169,9 @@ class ImprovedSShapePathPlanner:
                     self.zone = other_zone
                     self.zone_sequence.append(self.zone)
                     self.touch_count = 0
-                    print(f"📍 已進入 {other_zone} 區域，入口點: {entry_point}")
+                    print(f" 已進入 {other_zone} 區域，入口點: {entry_point}")
                 else:
-                    print(f"❌ 無法導航至 {other_zone} 區域入口點，路徑規劃終止。")
+                    print(f" 無法導航至 {other_zone} 區域入口點，路徑規劃終止。")
                     return None # 嚴重錯誤
                 continue
 
@@ -192,12 +192,12 @@ class ImprovedSShapePathPlanner:
                 if item in self.visited:
                     continue
 
-                print(f"🎯 處理目標: {item} (掃描方向: {direction})")
+                print(f" 處理目標: {item} (掃描方向: {direction})")
                 relays = self.gen_relays_for(item)[self.zone]
                 aps = self.gen_access(item)
 
                 if not relays or not aps:
-                    print(f"⚠️ 無法為 {item} 生成導航點，標記為已訪問並跳過。")
+                    print(f" 無法為 {item} 生成導航點，標記為已訪問並跳過。")
                     self.visited.add(item)
                     continue
 
@@ -206,7 +206,7 @@ class ImprovedSShapePathPlanner:
 
                 seg_to_relay = plan_route_a_star(pos, rlay, self.wm, dyn, forbid)
                 if not seg_to_relay:
-                    print(f"❌ 無法找到到達中繼點 {rlay} 的路徑，跳過 {item}。")
+                    print(f" 無法找到到達中繼點 {rlay} 的路徑，跳過 {item}。")
                     self.visited.add(item)
                     continue
                 
@@ -225,7 +225,7 @@ class ImprovedSShapePathPlanner:
                             path.extend(seg_across[:idx+1])
                             pos = ap
                             self.visited.add(item)
-                            print(f"✅ 已揀取: {item} (在橫穿路徑上)")
+                            print(f" 已揀取: {item} (在橫穿路徑上)")
                             # 繼續路徑的剩餘部分
                             if idx + 1 < len(seg_across):
                                 path.extend(seg_across[idx+1:])
@@ -242,15 +242,15 @@ class ImprovedSShapePathPlanner:
                         path.extend(seg_to_ap)
                         pos = ap
                         self.visited.add(item)
-                        print(f"✅ 已揀取: {item}")
+                        print(f" 已揀取: {item}")
                     else:
-                        print(f"⚠️ 無法從 {pos} 導航至 {item} 的訪問點 {ap}，跳過。")
+                        print(f" 無法從 {pos} 導航至 {item} 的訪問點 {ap}，跳過。")
                         self.visited.add(item) # 標記為已訪問避免死循環
 
         print(f"=== S-Shape 結束 ===")
-        print(f"📊 訪問 {len(self.visited)}/{len(self.current_items)} 個貨物")
-        print(f"📍 最終位置: {pos}")
-        print(f"📏 路徑總長度: {len(path)} 步")
+        print(f" 訪問 {len(self.visited)}/{len(self.current_items)} 個貨物")
+        print(f" 最終位置: {pos}")
+        print(f" 路徑總長度: {len(path)} 步")
         return path
 
 
@@ -262,11 +262,11 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
     此函式為系統的統一入口點，它會根據 `cost_map` 的內容決定是否啟用
     改良式 S-Shape 演算法。
     """
-    print(f"🗺️  改良式 S-Shape 策略處理中: {start_pos} -> {target_pos}")
+    print(f"  改良式 S-Shape 策略處理中: {start_pos} -> {target_pos}")
     
     if cost_map and 's_shape_picks' in cost_map and len(cost_map['s_shape_picks']) > 1:
         pick_locations = cost_map['s_shape_picks']
-        print(f"🔄 啟用改良式 S-Shape 策略，共 {len(pick_locations)} 個撿貨點。")
+        print(f" 啟用改良式 S-Shape 策略，共 {len(pick_locations)} 個撿貨點。")
         
         planner = ImprovedSShapePathPlanner(warehouse_matrix)
         
@@ -275,17 +275,17 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
         
         if cache_key in _s_shape_cache:
             full_path = _s_shape_cache[cache_key]
-            print("⚡️ 從快取中讀取完整路徑。")
+            print(" 從快取中讀取完整路徑。")
         else:
             full_path = planner.execute_items_only(start_pos, pick_locations, dynamic_obstacles, forbidden_cells)
             if full_path:
                 _s_shape_cache[cache_key] = full_path
-                print("💾 新的完整路徑已計算並快取。")
+                print(" 新的完整路徑已計算並快取。")
             else:
-                print("❌ 改良式 S-Shape 策略無法生成完整路徑。")
+                print(" 改良式 S-Shape 策略無法生成完整路徑。")
 
         if not full_path:
-            print("⚠️ S-Shape 策略無路徑，回退至標準 A* 演算法。")
+            print(" S-Shape 策略無路徑，回退至標準 A* 演算法。")
             return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
 
         try:
@@ -304,13 +304,13 @@ def plan_route(start_pos, target_pos, warehouse_matrix, dynamic_obstacles: Optio
                 print(f"📍 返回 S-Shape 路徑片段，共 {len(result_path)} 步。")
                 return result_path if result_path else None
             else:
-                print(f"⚠️ 目標點 {target_pos} 不在計算出的 S-Shape 路徑中，回退至標準 A*。")
+                print(f" 目標點 {target_pos} 不在計算出的 S-Shape 路徑中，回退至標準 A*。")
                 return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
         
         except ValueError:
-            print(f"⚠️ 處理路徑時發生錯誤，回退至標準 A*。")
+            print(f" 處理路徑時發生錯誤，回退至標準 A*。")
             return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells)
     
     # 如果不符合 S-Shape 策略的觸發條件，使用標準 A* 演算法
-    print("🔄 未觸發 S-Shape (單點任務或無指定撿貨點)，使用標準 A* 演算法。")
+    print(" 未觸發 S-Shape (單點任務或無指定撿貨點)，使用標準 A* 演算法。")
     return plan_route_a_star(start_pos, target_pos, warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
