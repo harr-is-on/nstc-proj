@@ -8,6 +8,7 @@ import json
 import importlib
 import statistics
 from typing import Tuple, List, Dict, Optional
+import openpyxl
 
 # 從專案中匯入模組
 from warehouse_layout import create_warehouse_layout, get_station_locations
@@ -516,7 +517,7 @@ if __name__ == "__main__":
             print(f"  Total_energy_usage: {all_total_energy_usage[i]:.2f}")
 
         # 計算並印出平均值
-        print("\n--- 平均結果 ---")
+        print("--- 平均結果 ---")
         if all_makespan:
             print(f"  Makespan 平均: {statistics.mean(all_makespan):.2f}")
         if all_total_idle_time:
@@ -525,3 +526,24 @@ if __name__ == "__main__":
             print(f"  Total Distance Traveled 平均: {statistics.mean(all_total_distance_traveled):.2f}")
         if all_total_energy_usage:
             print(f"  Total Energy Usage 平均: {statistics.mean(all_total_energy_usage):.2f}")
+        
+                # --- 大規模模擬彙總 → xlsx (四欄 × N列；無表頭，確保正好 N 列) ---
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Summary"
+
+            # 逐列寫入四個欄位：Makespan, IdleTime, Distance, Energy
+            for i in range(len(all_makespan)):
+                ws.append([
+                    all_makespan[i],
+                    all_total_idle_time[i],
+                    all_total_distance_traveled[i],
+                    all_total_energy_usage[i],
+                ])
+
+            filename = f"8robotA{NUM_SIMULATIONS}次.xlsx"
+            wb.save(filename)
+            print(f"\n已輸出 Excel：{filename}")
+        except Exception as e:
+            print(f"輸出 Excel 失敗：{e}")
