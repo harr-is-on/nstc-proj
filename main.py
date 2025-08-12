@@ -18,7 +18,7 @@ from robot_and_initial_state import (
     SIMULATION_CONFIG
 )
 from strategy_config import ROUTING_STRATEGY
-from charging_config import CHARGING_STRATEGY, CHARGING_STATION_CONFIG
+from charging_config import CHARGING_STRATEGY, CHARGING_STATION_CONFIG 
 from taskmanager import TaskManager
 from congestion_model import CongestionManager
 from visualization import Visualizer
@@ -26,6 +26,10 @@ from performance_logger import PerformanceLogger
 
 Coord = Tuple[int, int]
 Task = Dict[str, any]
+
+# --- 靜態匯入通用函式 ---
+# 從基礎路徑規劃模組匯入通用函式，避免每個策略模組都重複定義
+from routing import euclidean_distance, find_adjacent_aisle
 
 
 # --- 策略選擇 ---
@@ -40,8 +44,6 @@ try:
     # 動態匯入路徑規劃策略
     routing_module = importlib.import_module(ROUTING_STRATEGY)
     plan_route = getattr(routing_module, 'plan_route')
-    euclidean_distance = getattr(routing_module, 'euclidean_distance')
-    find_adjacent_aisle = getattr(routing_module, 'find_adjacent_aisle')
     
     # 動態匯入充電策略
     charging_module = importlib.import_module(CHARGING_STRATEGY)
@@ -150,7 +152,7 @@ class SimulationEngine:
                     if robot.position != robot.target_station_pos:
                         # 如果還沒到最終站點，代表它到達了排隊區
                         robot.status = RobotStatus.WAITING_IN_QUEUE
-                        print(f"🚶 機器人 {robot.id} 到達排隊區 {robot.position}，開始排隊。")
+                        print(f"機器人 {robot.id} 到達排隊區 {robot.position}，開始排隊。")
                     else:
                         # 如果已到達最終站點
                         if robot.status == RobotStatus.MOVING_TO_DROPOFF:
@@ -160,10 +162,10 @@ class SimulationEngine:
         else:
             # 機器人被阻擋，增加等待時間
             robot.wait_time += 1
-            print(f"🚧 機器人 {robot.id} 在 {robot.position} 被阻擋 (等待時間: {robot.wait_time})")
+            print(f"機器人 {robot.id} 在 {robot.position} 被阻擋 (等待時間: {robot.wait_time})")
 
             if robot.position in self.all_queue_spots:
-                print(f"🔄 機器人 {robot.id} 在排隊時被阻擋，重設狀態為 WAITING_IN_QUEUE。")
+                print(f"機器人 {robot.id} 在排隊時被阻擋，重設狀態為 WAITING_IN_QUEUE。")
                 robot.status = RobotStatus.WAITING_IN_QUEUE
                 robot.path = []
             elif robot.wait_time > robot.replan_wait_threshold:
@@ -204,7 +206,7 @@ class SimulationEngine:
         new_path = plan_route(robot.position, final_destination, self.warehouse_matrix, dynamic_obstacles, forbidden_cells, cost_map)
         
         if new_path:
-            print(f"🗺️ 機器人 {robot.id} 找到新路徑！")
+            print(f"機器人 {robot.id} 找到新路徑！")
             robot.path = new_path
             robot.wait_time = 0
         else:
@@ -323,8 +325,21 @@ class SimulationEngine:
             print(f" 機器人 {robot.id} 在貨架 {robot.position} 旁找不到可用的走道！")
             robot.clear_task()
             return
-        
-        path = plan_route(start_pos_for_route, next_shelf, self.warehouse_matrix)
+
+        # 【修正】為後續路徑規劃準備 cost_map，以確保複雜策略能持續運作
+        cost_map = {}
+        if robot.task and len(robot.task.get('shelf_locations', [])) > 0:
+            strategy_key_map = {
+                'routing_m': 'composite_picks',
+                'routing_l': 'largest_gap_picks',
+                'routing_s': 's_shape_picks'
+            }
+            routing_strategy_name = ROUTING_STRATEGY
+            if routing_strategy_name in strategy_key_map:
+                key = strategy_key_map[routing_strategy_name]
+                cost_map[key] = robot.task['shelf_locations']
+
+        path = plan_route(start_pos_for_route, next_shelf, self.warehouse_matrix, cost_map=cost_map)
         if path:
             robot.position = start_pos_for_route
             robot.path = path
@@ -346,7 +361,8 @@ class SimulationEngine:
         # 嚴格限制：只能從最遠的入口進入，其他所有排隊格都禁止
         forbidden_cells = self.all_queue_spots - {best_queue_spot}
         start_pos_for_route = find_adjacent_aisle(robot.position, self.warehouse_matrix)
-        path = plan_route(start_pos_for_route, best_queue_spot, self.warehouse_matrix, forbidden_cells=forbidden_cells)
+        # 【修正】前往交貨站的路徑通常是單點，不需要複雜的 cost_map，但保持參數一致性是好習慣
+        path = plan_route(start_pos_for_route, best_queue_spot, self.warehouse_matrix, forbidden_cells=forbidden_cells, cost_map=None)
         if path:
             print(f" 機器人 {robot.id} 從貨架移至走道 {start_pos_for_route}，前往排隊區入口 {best_queue_spot}。")
             robot.position = start_pos_for_route
@@ -379,7 +395,7 @@ class SimulationEngine:
 
             # 安全機制：防止因無法完成任務而導致的無限迴圈
             if time_step > self.max_steps_safety_limit:
-                print(f"⚠️ 安全警告：模擬達到最大步數 {self.max_steps_safety_limit}，強制終止。")
+                print(f"安全警告：模擬達到最大步數 {self.max_steps_safety_limit}，強制終止。")
                 break
 
             # --- 1. Generate and Assign Tasks ---
@@ -405,7 +421,11 @@ class SimulationEngine:
                 self._update_robot_state(robot, approved_robot_ids, spots_targeted_in_queue_logic, time_step)
 
             # --- 4. Update Charging Station ---
-            finished_charging_robots = self.charging_station.update()
+            # 【新】計算閒置機器人數量，以供動態充電策略使用
+            idle_robot_count = sum(1 for r in self.robots.values() if r.status == RobotStatus.IDLE)
+            
+            # 將閒置數量傳遞給充電站
+            finished_charging_robots = self.charging_station.update(idle_robot_count=idle_robot_count)
             for robot in finished_charging_robots:
                 robot.stop_charging() # 更新機器人狀態為閒置，並將電量充滿
 
@@ -419,17 +439,20 @@ class SimulationEngine:
 
             # --- 5. 視覺化呈現 ---
             if self.visualize:
+                # 取得當前系統負載狀態以供顯示
+                system_load_state = self.charging_station.get_current_state_name(idle_robot_count)
                 completed_tasks = self.performance_logger.get_tasks_completed()
                 self.visualizer.draw(
                     sim_time=time_step,
                     completed_tasks=completed_tasks,
-                    target_tasks=self.target_tasks_completed
+                    target_tasks=self.target_tasks_completed,
+                    system_load=system_load_state
                 )
 
         # --- 模擬結束 ---
         completed_tasks = self.performance_logger.get_tasks_completed()
         print(f"\n--- 模擬在完成 {completed_tasks} 個任務後於 {time_step} 時間步結束 ---")
-        print("\n--- 效能報告 ---")
+        print(f"\n--- 效能報告 (Routing: {ROUTING_STRATEGY}, Charging: {CHARGING_STRATEGY}) ---")
         report = self.performance_logger.report()
         print(json.dumps(report, indent=2))
         
@@ -442,14 +465,51 @@ if __name__ == "__main__":
     # 'off': 關閉無頭模式 (顯示動畫)
     HEADLESS_MODE = 'on'  # <--- 在這裡修改
 
+    # --- 大規模模擬模式設定 ---
+    LARGE_SCALE_SIMULATION_MODE = True # 設定為 True 啟用大規模模擬
+    NUM_SIMULATIONS = 100 # 大規模模擬的次數
+
     print(" 正在啟動倉儲模擬...")
 
     # 根據設定決定是否啟用視覺化
-    run_with_visualization = HEADLESS_MODE.lower() != 'on'
+    # 大規模模擬模式下，強制關閉視覺化以提高效率
+    run_with_visualization = HEADLESS_MODE.lower() != 'on' and not LARGE_SCALE_SIMULATION_MODE
 
     if not run_with_visualization:
         print(" 已啟用無頭模式，將以最快速度運行。")
+    
+    all_makespan = []
+    all_tasks_completed = []
+    all_total_idle_time = []
+    all_total_distance_traveled = []
+    all_total_energy_usage = []
 
-    engine = SimulationEngine(visualize=run_with_visualization)
-    engine.run()
+    num_runs = NUM_SIMULATIONS if LARGE_SCALE_SIMULATION_MODE else 1
+
+    for i in range(num_runs):
+        if LARGE_SCALE_SIMULATION_MODE:
+            print(f"\n--- 執行大規模模擬: 第 {i+1}/{NUM_SIMULATIONS} 次 ---")
+        
+        engine = SimulationEngine(visualize=run_with_visualization)
+        engine.run()
+        
+        if LARGE_SCALE_SIMULATION_MODE:
+            report = engine.performance_logger.report()
+            all_makespan.append(report.get("overall_metrics", {}).get("makespan", 0))
+            all_tasks_completed.append(report.get("overall_metrics", {}).get("tasks_completed", 0))
+            all_total_idle_time.append(report.get("overall_metrics", {}).get("total_idle_time", 0))
+            all_total_distance_traveled.append(report.get("overall_metrics", {}).get("total_distance_traveled", 0))
+            all_total_energy_usage.append(report.get("overall_metrics", {}).get("total_energy_usage", 0))
+
     print(" 模擬結束。")
+
+    if LARGE_SCALE_SIMULATION_MODE:
+        print("\n--- 大規模模擬結果彙總 ---")
+        print(f"總模擬次數: {NUM_SIMULATIONS}")
+        print("\n--- 各次模擬結果 ---")
+        for i in range(num_runs):
+            print(f"第 {i+1} 次模擬:")
+            print(f"  Makespan: {all_makespan[i]:.2f}")
+            print(f"  Total_idle_time: {all_total_idle_time[i]:.2f}")
+            print(f"  Total_distance_traveled: {all_total_distance_traveled[i]:.2f}")
+            print(f"  Total_energy_usage: {all_total_energy_usage[i]:.2f}")
